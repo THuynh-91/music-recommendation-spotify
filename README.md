@@ -34,28 +34,28 @@ The project combines **Next.js (frontend)** and **FastAPI (backend)**, with Dock
 ## 📦 Getting Started
 
 ### 1. Clone the repo
-\\\Bash
+```Bash
 git clone https://github.com/THuynh-91/music-recommendation-spotify.git
 cd music-recommendation-spotify
-\\\
+```
 
 ### 2. Set up environment variables
 Create a file called **.env** in the project root and add your Spotify credentials:
 
-\\\Bash
+```Bash
 SPOTIFY_CLIENT_ID=your_client_id
 SPOTIFY_CLIENT_SECRET=your_client_secret
 SPOTIFY_REDIRECT_URI=http://localhost:3000/callback
-\\\
+```
 
 > Tip: You can also copy .env.example into .env and fill in your values.
 
 ### 3. Run with Docker
 Build and start the containers with:
 
-\\\Bash
+```Bash
 docker compose up --build
-\\\
+```
 
 The app will be available at [http://localhost:3000](http://localhost:3000).
 
