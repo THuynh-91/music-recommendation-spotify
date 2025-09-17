@@ -1,4 +1,4 @@
-﻿# 🎵 Music Recommendation with Spotify
+﻿# 🎵 Music Recommendation with Spotify - Still WIP
 
 This is a full-stack web app that analyzes your Spotify tracks and playlists, then generates personalized music recommendations.  
 The project combines **Next.js (frontend)** and **FastAPI (backend)**, with Docker for deployment. WIP
