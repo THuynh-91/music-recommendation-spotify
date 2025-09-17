@@ -1,7 +1,7 @@
 ﻿# 🎵 Music Recommendation with Spotify
 
 This is a full-stack web app that analyzes your Spotify tracks and playlists, then generates personalized music recommendations.  
-The project combines **Next.js (frontend)** and **FastAPI (backend)**, with Docker for deployment.
+The project combines **Next.js (frontend)** and **FastAPI (backend)**, with Docker for deployment. WIP
 
 ---
 
@@ -21,7 +21,7 @@ The project combines **Next.js (frontend)** and **FastAPI (backend)**, with Dock
 
 ---
 
-## 🛠 Tech Stack
+##Tech Stack
 - **Frontend**: [Next.js](https://nextjs.org/) + TypeScript  
 - **Backend**: [FastAPI](https://fastapi.tiangolo.com/) + Python 3.11  
 - **ML / DSP**: librosa, FAISS  
@@ -34,7 +34,7 @@ The project combines **Next.js (frontend)** and **FastAPI (backend)**, with Dock
 ## 📦 Getting Started
 
 ### 1. Clone the repo
-\\\ash
+\\\Bash
 git clone https://github.com/THuynh-91/music-recommendation-spotify.git
 cd music-recommendation-spotify
 \\\
@@ -42,7 +42,7 @@ cd music-recommendation-spotify
 ### 2. Set up environment variables
 Create a file called **.env** in the project root and add your Spotify credentials:
 
-\\\ash
+\\\Bash
 SPOTIFY_CLIENT_ID=your_client_id
 SPOTIFY_CLIENT_SECRET=your_client_secret
 SPOTIFY_REDIRECT_URI=http://localhost:3000/callback
@@ -53,7 +53,7 @@ SPOTIFY_REDIRECT_URI=http://localhost:3000/callback
 ### 3. Run with Docker
 Build and start the containers with:
 
-\\\ash
+\\\Bash
 docker compose up --build
 \\\
 
