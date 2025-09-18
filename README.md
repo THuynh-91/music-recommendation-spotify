@@ -1,11 +1,11 @@
-﻿#Music Recommendation with Spotify 
+﻿# Music Recommendation with Spotify 
 
 This is a full-stack web app that analyzes your Spotify tracks and playlists, then generates personalized music recommendations.  
 The project combines **Next.js (frontend)** and **FastAPI (backend)**, with Docker for deployment. WIP
 
 ---
 
-##Features
+## Features
 - Input a **Spotify track or playlist URL**.
 - Detect whether it’s a single track or playlist.
 - For tracks:
@@ -21,7 +21,7 @@ The project combines **Next.js (frontend)** and **FastAPI (backend)**, with Dock
 
 ---
 
-##Tech Stack
+## Tech Stack
 - **Frontend**: [Next.js](https://nextjs.org/) + TypeScript  
 - **Backend**: [FastAPI](https://fastapi.tiangolo.com/) + Python 3.11  
 - **ML / DSP**: librosa, FAISS  
@@ -31,7 +31,7 @@ The project combines **Next.js (frontend)** and **FastAPI (backend)**, with Dock
 
 ---
 
-##Getting Started
+## Getting Started
 
 ### 1. Clone the repo
 ```Bash
@@ -61,17 +61,17 @@ The app will be available at [http://localhost:3000](http://localhost:3000).
 
 ---
 
-##Roadmap
+## Roadmap
 - [ ] User accounts + persistent preferences  
 - [ ] More advanced recommendation strategies (clustering, embeddings)  
 - [ ] Deploy to cloud (Render / Vercel / AWS)  
 
 ---
 
-##Contributing
+## Contributing
 Pull requests are welcome! For major changes, open an issue first to discuss what you’d like to improve.
 
 ---
 
-##License
+## License
 MIT License © 2025 [Tri Huynh](https://github.com/THuynh-91)
