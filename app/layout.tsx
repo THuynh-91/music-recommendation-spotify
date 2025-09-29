@@ -1,11 +1,14 @@
-﻿export const metadata = { title: "Spotify Rec", description: "Local dev" };
+import "./globals.css";
+
+export const metadata = {
+  title: "Spotify Recommendation Studio",
+  description: "Analyze Spotify tracks and playlists with FAISS-powered intelligence",
+};
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body style={{ margin: 0, fontFamily: "ui-sans-serif, system-ui" }}>
-        {children}
-      </body>
+      <body>{children}</body>
     </html>
   );
 }

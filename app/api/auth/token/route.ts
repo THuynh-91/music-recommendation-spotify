@@ -1,7 +1,10 @@
-﻿import { NextResponse } from "next/server";
+import { NextResponse } from "next/server";
+
+import { applySpotifyCookies } from "@/lib/server-auth";
+import type { SpotifyTokenResponse } from "@/lib/server-auth";
 
 function b64urlDecode(s: string) {
-  s = (s || "").replace(/-/g,"+").replace(/_/g,"/");
+  s = (s || "").replace(/-/g, "+").replace(/_/g, "/");
   const pad = (4 - (s.length % 4)) % 4;
   s += "=".repeat(pad);
   return Buffer.from(s, "base64").toString("utf8");
@@ -10,10 +13,9 @@ function b64urlDecode(s: string) {
 export async function POST(req: Request) {
   try {
     const { code, state } = await req.json();
-    if (!code)  return NextResponse.json({ error: "missing_code" }, { status: 400 });
+    if (!code) return NextResponse.json({ error: "missing_code" }, { status: 400 });
     if (!state) return NextResponse.json({ error: "missing_state" }, { status: 400 });
 
-    // Always decode verifier from state (cookie-free)
     let verifier = "";
     try {
       const decoded = JSON.parse(b64urlDecode(state));
@@ -36,25 +38,14 @@ export async function POST(req: Request) {
       body: params.toString(),
     });
 
-    const data = await r.json();
+    const data = (await r.json()) as SpotifyTokenResponse & { expires_in: number };
     if (!r.ok) return NextResponse.json(data, { status: r.status });
 
-    const isProd = process.env.NODE_ENV === "production";
     const res = NextResponse.json({ ok: true, expires_in: data.expires_in });
-
-    if (data.access_token) {
-      res.cookies.set("sp_access_token", data.access_token, {
-        httpOnly: true, secure: isProd, sameSite: "lax", path: "/", maxAge: data.expires_in ?? 3600,
-      });
-    }
-    if (data.refresh_token) {
-      res.cookies.set("sp_refresh_token", data.refresh_token, {
-        httpOnly: true, secure: isProd, sameSite: "lax", path: "/", maxAge: 60 * 60 * 24 * 30,
-      });
-    }
-
+    applySpotifyCookies(res, data);
     return res;
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? "server_error" }, { status: 500 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "server_error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

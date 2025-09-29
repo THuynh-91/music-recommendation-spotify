@@ -1,0 +1,9 @@
+.git
+node_modules
+.next
+.env*
+*.log
+Dockerfile*
+docker-compose*.yml
+**/.DS_Store
+**/Thumbs.db

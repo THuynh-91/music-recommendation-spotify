@@ -1,77 +1,91 @@
-﻿# Music Recommendation with Spotify 
+# Spotify Recommendation Platform
 
-This is a full-stack web app that analyzes your Spotify tracks and playlists, then generates personalized music recommendations.  
-The project combines **Next.js (frontend)** and **FastAPI (backend)**, with Docker for deployment. WIP
-
----
+A full-stack Spotify intelligence platform that authenticates with Spotify, ingests tracks and playlists, and surfaces explainable recommendations using FAISS vector search and DSP feature engineering.
 
 ## Features
-- Input a **Spotify track or playlist URL**.
-- Detect whether it’s a single track or playlist.
-- For tracks:
-  - Fetch **Spotify Audio Features** (tempo, energy, danceability, etc.).
-  - Fetch **Audio Analysis** (beats, sections, time signature).
-  - Optionally compute DSP features (via librosa).
-- For playlists:
-  - Build a **catalog of tracks** with extracted features.
-  - Store features in a **FAISS vector index** for fast similarity search.
-- Generate **Top-K recommendations** using nearest neighbors with genre soft-boost and diversity re-ranking.
-- Each recommendation includes a clear, human-readable explanation of *why it was suggested*.
-- Fully containerized with **Docker Compose**.
+- **PKCE OAuth** with Spotify and secure token storage via HTTP-only cookies.
+- Track & playlist ingestion via FastAPI, SQLAlchemy, Redis caching, and FAISS-based similarity search.
+- DSP descriptors (librosa) blended with Spotify audio features and analysis for richer vectors.
+- Genre-aware re-ranking and diversity guardrails to avoid repetitive recommendations.
+- Next.js 14 App Router UI with modern styling and production-quality DX (lint, type-check, Docker).
+- Containerised stack (Next.js frontend, FastAPI backend, Postgres, Redis) orchestrated by Docker Compose.
 
----
-
-## Tech Stack
-- **Frontend**: [Next.js](https://nextjs.org/) + TypeScript  
-- **Backend**: [FastAPI](https://fastapi.tiangolo.com/) + Python 3.11  
-- **ML / DSP**: librosa, FAISS  
-- **Database / Cache**: PostgreSQL, Redis  
-- **Deployment**: Docker + Docker Compose  
-- **Auth**: Spotify OAuth2
-
----
-
-## Getting Started
-
-### 1. Clone the repo
-```Bash
-git clone https://github.com/THuynh-91/music-recommendation-spotify.git
-cd music-recommendation-spotify
+## Project Layout
+```
+.
++-- app/                     # Next.js App Router code
++-- backend/                 # FastAPI service
++-- docs/                    # Architecture notes
++-- lib/                     # Shared frontend utilities
++-- types/                   # Type declarations
++-- docker-compose.next.yml  # Production docker composition
 ```
 
-### 2. Set up environment variables
-Create a file called **.env** in the project root and add your Spotify credentials:
+## Prerequisites
+- Node.js 20+
+- Python 3.11+
+- Docker & Docker Compose (for containerised runs)
+- Spotify application with redirect URI `http://127.0.0.1:3000/callback`
 
-```Bash
-SPOTIFY_CLIENT_ID=your_client_id
-SPOTIFY_CLIENT_SECRET=your_client_secret
-SPOTIFY_REDIRECT_URI=http://localhost:3000/callback
+Populate `.env` with your secrets (see [.env](./.env) for required keys):
+```
+SPOTIFY_CLIENT_ID=...
+SPOTIFY_CLIENT_SECRET=...
+REDIRECT_URI=http://127.0.0.1:3000/callback
+RECOMMENDER_SERVICE_TOKEN=change-me
+BACKEND_SERVICE_TOKEN=change-me # should match RECOMMENDER_SERVICE_TOKEN
 ```
 
-> Tip: You can also copy .env.example into .env and fill in your values.
+## Local Development
+### Frontend
+```bash
+npm install
+npm run dev
+```
+Runs on [http://127.0.0.1:3000](http://127.0.0.1:3000).
 
-### 3. Run with Docker
-Build and start the containers with:
-
-```Bash
-docker compose up --build
+### Backend
+```bash
+cd backend
+python -m venv .venv && .venv\Scripts\activate # or source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
 ```
 
-The app will be available at [http://localhost:3000](http://localhost:3000).
+Ensure Postgres (`postgresql+asyncpg://postgres:postgres@localhost:5432/spotify`) and Redis are available in development. You can spin them up quickly with:
+```bash
+docker run --rm -p 5432:5432 -e POSTGRES_DB=spotify -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres postgres:16-alpine
+docker run --rm -p 6379:6379 redis:7-alpine
+```
 
----
+### Tooling
+- `npm run lint` / `npm run build` for Next.js validation.
+- `python -m compileall backend/app` to sanity-check backend syntax.
+- (Optional) add `pytest` suites under `backend/tests` for deeper coverage.
 
-## Roadmap
-- [ ] User accounts + persistent preferences  
-- [ ] More advanced recommendation strategies (clustering, embeddings)  
-- [ ] Deploy to cloud (Render / Vercel / AWS)  
+## Production via Docker Compose
+```bash
+docker compose -f docker-compose.next.yml up --build
+```
+Services exposed:
+- Frontend: `http://127.0.0.1:3000`
+- Backend API: `http://127.0.0.1:8000/v1/...`
+- Postgres (`localhost:5432`) and Redis (`localhost:6379`) for persistence & caching.
 
----
+Images are multi-stage, non-root, and produce a standalone Next.js server bundle plus a slim Python runtime with FAISS, librosa, and friends baked in.
 
-## Contributing
-Pull requests are welcome! For major changes, open an issue first to discuss what you’d like to improve.
+## API Highlights
+- `POST /v1/recommendations` � ingest playlist or fetch track recommendations; returns explanations & similarity scores.
+- `GET /v1/health` � backend health & FAISS index status.
+- Frontend proxy endpoint `/api/recommend` handles token refresh and forwards to backend with service-token auth.
 
----
+## Security Considerations
+- Spotify tokens kept exclusively in HTTP-only cookies; server routes refresh on-demand.
+- Frontend?backend authenticated via shared service token (`RECOMMENDER_SERVICE_TOKEN`).
+- Redis locks de-duplicate playlist ingestion and FAISS index rebuilds.
 
-## License
-MIT License © 2025 [Tri Huynh](https://github.com/THuynh-91)
+## Monitoring & Next Steps
+- Add pytest suites for backend recommendation pipelines.
+- Wire Playwright or Vitest UI tests for critical flows.
+- Extend CI to run `npm run build`, backend compile, and Docker image builds.
+- Deploy containers (e.g., Render, Fly.io, AWS ECS) with secret management for Spotify credentials.

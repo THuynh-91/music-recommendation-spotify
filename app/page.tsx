@@ -1,11 +1,16 @@
-﻿"use client";
+import { cookies } from "next/headers";
+
+import { HomeClient } from "./components/HomeClient";
+
+export const dynamic = "force-dynamic";
+
 export default function Page() {
-  const signIn = () => { window.location.href = "/api/auth/start"; };
+  const cookieStore = cookies();
+  const signedIn = Boolean(cookieStore.get("sp_access_token") || cookieStore.get("sp_refresh_token"));
+
   return (
-    <main style={{ padding: 16 }}>
-      <button onClick={signIn} style={{ padding: 10, border: "1px solid #ccc", borderRadius: 8 }}>
-        Sign in with Spotify
-      </button>
+    <main className="page">
+      <HomeClient signedIn={signedIn} />
     </main>
   );
 }

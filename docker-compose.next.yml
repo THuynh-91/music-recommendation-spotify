@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      RECOMMENDER_API_URL: http://backend:8000
+      RECOMMENDER_SERVICE_TOKEN: ${RECOMMENDER_SERVICE_TOKEN}
+      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID}
+      REDIRECT_URI: ${REDIRECT_URI}
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+  backend:
+    build:
+      context: backend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      BACKEND_SERVICE_TOKEN: ${BACKEND_SERVICE_TOKEN}
+      BACKEND_SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID}
+      BACKEND_SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET}
+      BACKEND_REDIS_URL: redis://redis:6379/0
+      BACKEND_POSTGRES_DSN: postgresql+asyncpg://postgres:postgres@postgres:5432/spotify
+      BACKEND_FAISS_INDEX_PATH: /data/index.faiss
+      BACKEND_FAISS_META_PATH: /data/index.json
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - backend-data:/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: spotify
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d spotify"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
+volumes:
+  postgres-data:
+  redis-data:
+  backend-data:
