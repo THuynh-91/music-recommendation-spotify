@@ -194,6 +194,7 @@ class SpotifyClient:
         seed_artists: Sequence[str] | None = None,
         seed_genres: Sequence[str] | None = None,
         limit: int = 20,
+        tunable_params: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {"limit": max(1, min(limit, 100))}
         if seed_tracks:
@@ -202,6 +203,8 @@ class SpotifyClient:
             params["seed_artists"] = ",".join(list(dict.fromkeys([artist for artist in seed_artists if artist])))
         if seed_genres:
             params["seed_genres"] = ",".join(list(dict.fromkeys([genre for genre in seed_genres if genre])))
+        if tunable_params:
+            params.update({key: value for key, value in tunable_params.items() if value is not None})
         return await self._request("GET", "/recommendations", params=params)
 
     async def get_playlist(self, playlist_id: str) -> Dict[str, Any]:

@@ -12,6 +12,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
+pytest.importorskip("aiosqlite")
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -53,6 +55,7 @@ class _StubSpotifyClient:
     analysis: Dict[str, Dict[str, Any]]
     artists: Dict[str, Dict[str, Any]]
     recommendations: List[Dict[str, Any]]
+    last_request: Dict[str, Any] | None = None
 
     async def get_track(self, track_id: str) -> Dict[str, Any]:
         return self.tracks[track_id]
@@ -73,7 +76,15 @@ class _StubSpotifyClient:
         seed_artists: Sequence[str] | None = None,
         seed_genres: Sequence[str] | None = None,
         limit: int = 20,
+        tunable_params: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:  # pragma: no cover - parameters unused in stub
+        self.last_request = {
+            "seed_tracks": list(seed_tracks or []),
+            "seed_artists": list(seed_artists or []),
+            "seed_genres": list(seed_genres or []),
+            "limit": limit,
+            "tunable_params": dict(tunable_params or {}),
+        }
         return {"tracks": list(self.recommendations)}
 
 
@@ -242,6 +253,14 @@ async def _run_backfill_flow(tmp_path: Path) -> None:
 
     await engine.dispose()
 
+    return stub_client
+
 
 def test_spotify_backfill_ingests_unseen_tracks(tmp_path: Path) -> None:
-    asyncio.run(_run_backfill_flow(tmp_path))
+    stub_client = asyncio.run(_run_backfill_flow(tmp_path))
+    assert stub_client.last_request is not None
+    params = stub_client.last_request["tunable_params"]
+    assert pytest.approx(params["target_tempo"], rel=0.0, abs=0.01) == 96.0
+    assert params["min_tempo"] < params["target_tempo"] < params["max_tempo"]
+    assert pytest.approx(params["target_danceability"], rel=0.0, abs=0.001) == 0.62
+    assert params["min_danceability"] < params["target_danceability"] < params["max_danceability"]

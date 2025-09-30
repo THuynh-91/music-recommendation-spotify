@@ -38,6 +38,20 @@ AUDIO_FEATURE_KEYS = [
     "mode",
 ]
 
+RECOMMENDATION_FLOAT_CONSTRAINTS: Dict[str, Tuple[float, float, float]] = {
+    "danceability": (0.0, 1.0, 0.12),
+    "energy": (0.0, 1.0, 0.15),
+    "valence": (0.0, 1.0, 0.15),
+    "acousticness": (0.0, 1.0, 0.2),
+    "instrumentalness": (0.0, 1.0, 0.2),
+    "liveness": (0.0, 1.0, 0.18),
+    "speechiness": (0.0, 1.0, 0.1),
+}
+
+TEMPO_RANGE = (30.0, 220.0, 8.0)
+LOUDNESS_RANGE = (-60.0, 0.0, 5.0)
+DURATION_RANGE = (30000.0, 600000.0, 20000.0)
+
 SharedGenres = Set[str]
 
 
@@ -263,6 +277,74 @@ def _collect_genres(artists: Sequence[models.Artist]) -> SharedGenres:
         if artist.genres:
             genres.update({g.lower() for g in artist.genres})
     return genres
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_spotify_tunable_params(
+    seed_features: Dict[str, Any],
+    *,
+    seed_track: models.Track | None = None,
+) -> Dict[str, Any]:
+    params: Dict[str, Any] = {}
+
+    for field, (lower, upper, window) in RECOMMENDATION_FLOAT_CONSTRAINTS.items():
+        numeric = _coerce_float(seed_features.get(field))
+        if numeric is None:
+            continue
+        clamped = max(lower, min(numeric, upper))
+        params[f"target_{field}"] = round(clamped, 3)
+        params[f"min_{field}"] = round(max(lower, clamped - window), 3)
+        params[f"max_{field}"] = round(min(upper, clamped + window), 3)
+
+    tempo = _coerce_float(seed_features.get("tempo"))
+    if tempo is not None:
+        tempo_min, tempo_max, tempo_window = TEMPO_RANGE
+        tempo_clamped = max(tempo_min, min(tempo, tempo_max))
+        params["target_tempo"] = round(tempo_clamped, 2)
+        params["min_tempo"] = round(max(tempo_min, tempo_clamped - tempo_window), 2)
+        params["max_tempo"] = round(min(tempo_max, tempo_clamped + tempo_window), 2)
+
+    duration = _coerce_float(seed_features.get("duration_ms"))
+    if duration is None and seed_track and seed_track.duration_ms is not None:
+        duration = float(seed_track.duration_ms)
+    if duration is not None:
+        duration_min, duration_max, duration_window = DURATION_RANGE
+        dynamic_window = max(duration_window, duration * 0.15)
+        duration_clamped = max(duration_min, min(duration, duration_max))
+        params["target_duration_ms"] = int(round(duration_clamped))
+        params["min_duration_ms"] = int(max(duration_min, duration_clamped - dynamic_window))
+        params["max_duration_ms"] = int(min(duration_max, duration_clamped + dynamic_window))
+
+    loudness = _coerce_float(seed_features.get("loudness"))
+    if loudness is not None:
+        loud_min, loud_max, loud_window = LOUDNESS_RANGE
+        loud_clamped = max(loud_min, min(loudness, loud_max))
+        params["target_loudness"] = round(loud_clamped, 2)
+        params["min_loudness"] = round(max(loud_min, loud_clamped - loud_window), 2)
+        params["max_loudness"] = round(min(loud_max, loud_clamped + loud_window), 2)
+
+    mode = seed_features.get("mode")
+    if isinstance(mode, (int, float)):
+        params["target_mode"] = 1 if int(round(mode)) else 0
+
+    key = seed_features.get("key")
+    if isinstance(key, (int, float)):
+        key_int = int(round(key)) % 12
+        params["target_key"] = key_int
+
+    popularity = getattr(seed_track, "popularity", None)
+    if popularity is not None:
+        popularity_int = int(popularity)
+        params["min_popularity"] = max(0, popularity_int - 15)
+        params["max_popularity"] = min(100, popularity_int + 15)
+
+    return params
 
 
 def _compute_similarity_score(raw_score: float, genre_overlap: int, seed_genre_count: int) -> float:
@@ -524,12 +606,15 @@ async def _backfill_with_spotify(
 
     artist_ids = [artist.id for artist in seed_track.artists if artist.id]
     seed_genre_list = sorted(seed_genres)
+    tunable_params = _build_spotify_tunable_params(seed_features, seed_track=seed_track)
+
     try:
         rec_payload = await spotify_client.get_recommendations(
             seed_tracks=[seed_track.id],
             seed_artists=artist_ids[:2],
             seed_genres=seed_genre_list[:2],
             limit=min(max(needed * 2, needed + 2), settings.recommendation_max_limit * 2),
+            tunable_params=tunable_params,
         )
     except SpotifyClientError as exc:
         logger.warning("Spotify fallback recommendations failed for %s: %s", seed_track.id, exc)
@@ -575,7 +660,7 @@ async def _backfill_with_spotify(
         penalty = 0.08 if seen_artists & artist_ids_set else 0.0
         adjusted = max(similarity - penalty, 0.0)
 
-        if seed_genres and genre_overlap == 0 and adjusted < 0.55:
+        if seed_genres and genre_overlap == 0 and adjusted < 0.65:
             # Skip obviously unrelated tracks when we know the seed genres
             continue
 
