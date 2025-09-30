@@ -45,7 +45,10 @@ export async function POST(req: Request) {
       typeof payload.limit === "number"
         ? Math.min(Math.max(Math.trunc(payload.limit), 1), 50)
         : undefined;
-    const requestBody: RecommendRequestBody = { url: payload.url, limit };
+    const requestBody: RecommendRequestBody = { url: payload.url };
+    if (typeof limit === "number") {
+      requestBody.limit = limit;
+    }
 
     const serviceToken = process.env.RECOMMENDER_SERVICE_TOKEN;
     if (!serviceToken) {
