@@ -265,10 +265,17 @@ def _collect_genres(artists: Sequence[models.Artist]) -> SharedGenres:
     return genres
 
 
-def _compute_similarity_score(raw_score: float, genre_overlap: int) -> float:
+def _compute_similarity_score(raw_score: float, genre_overlap: int, seed_genre_count: int) -> float:
     base = max(min((raw_score + 1.0) / 2.0, 1.0), 0.0)
-    boost = min(genre_overlap * 0.04, 0.12)
-    return max(min(base + boost, 1.0), 0.0)
+    if seed_genre_count > 0:
+        if genre_overlap > 0:
+            boost = 0.06 + max(genre_overlap - 1, 0) * 0.04
+            base += min(boost, 0.22)
+        else:
+            base -= 0.18
+    elif genre_overlap > 0:
+        base += min(genre_overlap * 0.03, 0.1)
+    return max(min(base, 1.0), 0.0)
 
 
 def _build_explanation(
@@ -441,7 +448,8 @@ async def _hydrate_recommendations(
         row[0].id: (row[0], row[1]) for row in result.all()
     }
 
-    ranked: List[Tuple[float, models.Track, models.TrackFeature, SharedGenres]] = []
+    seed_genre_count = len(seed_genres)
+    ranked: List[Tuple[float, models.Track, models.TrackFeature, SharedGenres, int]] = []
     for track_id, raw_score in matches:
         if track_id in exclude:
             continue
@@ -451,14 +459,14 @@ async def _hydrate_recommendations(
         track_obj, feature_obj = data
         candidate_genres = _collect_genres(track_obj.artists)
         genre_overlap = len(seed_genres & candidate_genres)
-        similarity = _compute_similarity_score(raw_score, genre_overlap)
-        ranked.append((similarity, track_obj, feature_obj, candidate_genres))
+        similarity = _compute_similarity_score(raw_score, genre_overlap, seed_genre_count)
+        ranked.append((similarity, track_obj, feature_obj, candidate_genres, genre_overlap))
 
-    ranked.sort(key=lambda item: item[0], reverse=True)
+    ranked.sort(key=lambda item: (item[4] > 0, item[0]), reverse=True)
 
     final: List[RecommendationItem] = []
     seen_artists: Set[str] = set()
-    for similarity, track_obj, feature_obj, candidate_genres in ranked:
+    for similarity, track_obj, feature_obj, candidate_genres, _ in ranked:
         if len(final) >= top_k:
             break
         artist_ids = {artist.id for artist in track_obj.artists}
@@ -478,6 +486,7 @@ async def _process_playlist(
     spotify_client: SpotifyClient,
     index_service: FaissService,
     settings: Settings,
+    top_k: int,
 ) -> RecommendResponse:
     lock_key = f"playlist:{playlist_id}:ingest"
     lock_acquired = await redis.set(lock_key, "1", nx=True, ex=600)
@@ -572,7 +581,8 @@ async def _process_playlist(
         recommendations: List[RecommendationItem] = []
         if centroid is not None:
             await index_service.ensure_loaded(session)
-            matches = await index_service.search(centroid, top_k=settings.recommendation_top_k * 4)
+            search_k = max(top_k * 4, top_k)
+            matches = await index_service.search(centroid, top_k=search_k)
             exclude = set(track_ids)
             seed_genres = set(genre for genre, _ in seed_genres_counter.most_common(20))
             seed_features = _average_audio_features(feature_payloads)
@@ -582,7 +592,7 @@ async def _process_playlist(
                 exclude=exclude,
                 seed_features=seed_features,
                 seed_genres=seed_genres,
-                top_k=settings.recommendation_top_k,
+                top_k=top_k,
             )
 
         summary = PlaylistIngestSummary(
@@ -619,6 +629,7 @@ async def recommend_for_entity(
     spotify_client: SpotifyClient,
     index_service: FaissService,
     settings: Settings,
+    limit: int,
 ) -> RecommendResponse:
     await index_service.ensure_loaded(session)
 
@@ -636,7 +647,8 @@ async def recommend_for_entity(
         if track_with_relations is not None:
             track = track_with_relations
 
-        matches = await index_service.search(vector, top_k=settings.recommendation_top_k * 3)
+        search_k = max(limit * 3, limit)
+        matches = await index_service.search(vector, top_k=search_k)
         seed_genres = _collect_genres(track.artists)
         recommendations = await _hydrate_recommendations(
             session,
@@ -644,7 +656,7 @@ async def recommend_for_entity(
             exclude={track.id},
             seed_features=features,
             seed_genres=seed_genres,
-            top_k=settings.recommendation_top_k,
+            top_k=limit,
         )
         response = RecommendResponse(
             type="track",
@@ -662,6 +674,7 @@ async def recommend_for_entity(
             spotify_client=spotify_client,
             index_service=index_service,
             settings=settings,
+            top_k=limit,
         )
 
     raise ValueError(f"Unsupported entity type {entity.kind}")
