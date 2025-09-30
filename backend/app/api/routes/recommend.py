@@ -34,6 +34,9 @@ async def create_recommendations(
 ) -> RecommendResponse:
     entity = parse_spotify_url(payload.url)
     try:
+        limit = payload.limit or settings.recommendation_top_k
+        limit = max(1, min(limit, settings.recommendation_max_limit))
+
         response = await recommend_for_entity(
             entity,
             session=session,
@@ -41,6 +44,7 @@ async def create_recommendations(
             spotify_client=spotify_client,
             index_service=index_service,
             settings=settings,
+            limit=limit,
         )
         return response
     except SpotifyAuthError as exc:
