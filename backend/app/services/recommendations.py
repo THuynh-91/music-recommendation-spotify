@@ -38,6 +38,33 @@ AUDIO_FEATURE_KEYS = [
     "mode",
 ]
 
+RECOMMENDATION_FLOAT_CONSTRAINTS: Dict[str, Tuple[float, float, float]] = {
+    "danceability": (0.0, 1.0, 0.12),
+    "energy": (0.0, 1.0, 0.15),
+    "valence": (0.0, 1.0, 0.15),
+    "acousticness": (0.0, 1.0, 0.2),
+    "instrumentalness": (0.0, 1.0, 0.2),
+    "liveness": (0.0, 1.0, 0.18),
+    "speechiness": (0.0, 1.0, 0.1),
+}
+
+TEMPO_RANGE = (30.0, 220.0, 8.0)
+LOUDNESS_RANGE = (-60.0, 0.0, 5.0)
+DURATION_RANGE = (30000.0, 600000.0, 20000.0)
+
+FEATURE_ALIGNMENT_RULES: Sequence[Tuple[str, float, float]] = (
+    ("danceability", 0.18, 1.0),
+    ("energy", 0.22, 1.0),
+    ("valence", 0.22, 0.95),
+    ("acousticness", 0.28, 0.7),
+    ("instrumentalness", 0.3, 0.55),
+    ("speechiness", 0.18, 0.4),
+)
+TEMPO_ALIGNMENT_TOLERANCE = 18.0
+LOUDNESS_ALIGNMENT_TOLERANCE = 6.0
+DURATION_ALIGNMENT_TOLERANCE = 60000.0
+MIN_ALIGNMENT_SCORE = 0.38
+
 SharedGenres = Set[str]
 
 
@@ -265,10 +292,155 @@ def _collect_genres(artists: Sequence[models.Artist]) -> SharedGenres:
     return genres
 
 
-def _compute_similarity_score(raw_score: float, genre_overlap: int) -> float:
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_spotify_tunable_params(
+    seed_features: Dict[str, Any],
+    *,
+    seed_track: models.Track | None = None,
+) -> Dict[str, Any]:
+    params: Dict[str, Any] = {}
+
+    for field, (lower, upper, window) in RECOMMENDATION_FLOAT_CONSTRAINTS.items():
+        numeric = _coerce_float(seed_features.get(field))
+        if numeric is None:
+            continue
+        clamped = max(lower, min(numeric, upper))
+        params[f"target_{field}"] = round(clamped, 3)
+        params[f"min_{field}"] = round(max(lower, clamped - window), 3)
+        params[f"max_{field}"] = round(min(upper, clamped + window), 3)
+
+    tempo = _coerce_float(seed_features.get("tempo"))
+    if tempo is not None:
+        tempo_min, tempo_max, tempo_window = TEMPO_RANGE
+        tempo_clamped = max(tempo_min, min(tempo, tempo_max))
+        params["target_tempo"] = round(tempo_clamped, 2)
+        params["min_tempo"] = round(max(tempo_min, tempo_clamped - tempo_window), 2)
+        params["max_tempo"] = round(min(tempo_max, tempo_clamped + tempo_window), 2)
+
+    duration = _coerce_float(seed_features.get("duration_ms"))
+    if duration is None and seed_track and seed_track.duration_ms is not None:
+        duration = float(seed_track.duration_ms)
+    if duration is not None:
+        duration_min, duration_max, duration_window = DURATION_RANGE
+        dynamic_window = max(duration_window, duration * 0.15)
+        duration_clamped = max(duration_min, min(duration, duration_max))
+        params["target_duration_ms"] = int(round(duration_clamped))
+        params["min_duration_ms"] = int(max(duration_min, duration_clamped - dynamic_window))
+        params["max_duration_ms"] = int(min(duration_max, duration_clamped + dynamic_window))
+
+    loudness = _coerce_float(seed_features.get("loudness"))
+    if loudness is not None:
+        loud_min, loud_max, loud_window = LOUDNESS_RANGE
+        loud_clamped = max(loud_min, min(loudness, loud_max))
+        params["target_loudness"] = round(loud_clamped, 2)
+        params["min_loudness"] = round(max(loud_min, loud_clamped - loud_window), 2)
+        params["max_loudness"] = round(min(loud_max, loud_clamped + loud_window), 2)
+
+    mode = seed_features.get("mode")
+    if isinstance(mode, (int, float)):
+        params["target_mode"] = 1 if int(round(mode)) else 0
+
+    key = seed_features.get("key")
+    if isinstance(key, (int, float)):
+        key_int = int(round(key)) % 12
+        params["target_key"] = key_int
+
+    popularity = getattr(seed_track, "popularity", None)
+    if popularity is not None:
+        popularity_int = int(popularity)
+        params["min_popularity"] = max(0, popularity_int - 15)
+        params["max_popularity"] = min(100, popularity_int + 15)
+
+    return params
+
+
+def _compute_feature_alignment(
+    seed_features: Dict[str, Any],
+    candidate_features: Dict[str, Any],
+) -> float:
+    score = 0.0
+    total_weight = 0.0
+
+    for field, tolerance, weight in FEATURE_ALIGNMENT_RULES:
+        seed_value = _coerce_float(seed_features.get(field))
+        candidate_value = _coerce_float(candidate_features.get(field))
+        if seed_value is None or candidate_value is None:
+            continue
+        diff = abs(seed_value - candidate_value)
+        closeness = max(0.0, 1.0 - min(diff / tolerance, 1.0))
+        score += closeness * weight
+        total_weight += weight
+
+    tempo_seed = _coerce_float(seed_features.get("tempo"))
+    tempo_candidate = _coerce_float(candidate_features.get("tempo"))
+    if tempo_seed is not None and tempo_candidate is not None:
+        tempo_diff = abs(tempo_seed - tempo_candidate)
+        closeness = max(0.0, 1.0 - min(tempo_diff / TEMPO_ALIGNMENT_TOLERANCE, 1.0))
+        score += closeness * 1.1
+        total_weight += 1.1
+
+    loudness_seed = _coerce_float(seed_features.get("loudness"))
+    loudness_candidate = _coerce_float(candidate_features.get("loudness"))
+    if loudness_seed is not None and loudness_candidate is not None:
+        loudness_diff = abs(loudness_seed - loudness_candidate)
+        closeness = max(0.0, 1.0 - min(loudness_diff / LOUDNESS_ALIGNMENT_TOLERANCE, 1.0))
+        score += closeness * 0.6
+        total_weight += 0.6
+
+    duration_seed = _coerce_float(seed_features.get("duration_ms"))
+    duration_candidate = _coerce_float(candidate_features.get("duration_ms"))
+    if duration_seed is not None and duration_candidate is not None:
+        duration_diff = abs(duration_seed - duration_candidate)
+        closeness = max(0.0, 1.0 - min(duration_diff / DURATION_ALIGNMENT_TOLERANCE, 1.0))
+        score += closeness * 0.6
+        total_weight += 0.6
+
+    mode_seed = _coerce_float(seed_features.get("mode"))
+    mode_candidate = _coerce_float(candidate_features.get("mode"))
+    if mode_seed is not None and mode_candidate is not None:
+        same_mode = 1.0 if int(round(mode_seed)) == int(round(mode_candidate)) else 0.0
+        score += same_mode * 0.3
+        total_weight += 0.3
+
+    key_seed = _coerce_float(seed_features.get("key"))
+    key_candidate = _coerce_float(candidate_features.get("key"))
+    if key_seed is not None and key_candidate is not None:
+        seed_int = int(round(key_seed)) % 12
+        candidate_int = int(round(key_candidate)) % 12
+        distance = abs(seed_int - candidate_int)
+        distance = min(distance, 12 - distance)
+        closeness = max(0.0, 1.0 - min(distance / 4.0, 1.0))
+        score += closeness * 0.4
+        total_weight += 0.4
+
+    if total_weight == 0.0:
+        return 0.5
+    return max(min(score / total_weight, 1.0), 0.0)
+
+
+def _compute_similarity_score(
+    raw_score: float,
+    genre_overlap: int,
+    seed_genre_count: int,
+    feature_alignment: float,
+) -> float:
     base = max(min((raw_score + 1.0) / 2.0, 1.0), 0.0)
-    boost = min(genre_overlap * 0.04, 0.12)
-    return max(min(base + boost, 1.0), 0.0)
+    combined = (base * 0.6) + (feature_alignment * 0.4)
+    if seed_genre_count > 0:
+        if genre_overlap > 0:
+            boost = 0.07 + max(genre_overlap - 1, 0) * 0.035
+            combined += min(boost, 0.2)
+        else:
+            combined -= 0.24
+    elif genre_overlap > 0:
+        combined += min(genre_overlap * 0.03, 0.09)
+    return max(min(combined, 1.0), 0.0)
 
 
 def _build_explanation(
@@ -305,6 +477,15 @@ def _build_explanation(
     if len(highlights) == 1:
         return highlights[0].capitalize()
     return highlights[0].capitalize() + "; " + "; ".join(highlights[1:])
+
+
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    if a.size == 0 or b.size == 0:
+        return 0.0
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
 
 
 def _average_audio_features(features_list: Sequence[Dict[str, Any]]) -> Dict[str, float]:
@@ -441,7 +622,8 @@ async def _hydrate_recommendations(
         row[0].id: (row[0], row[1]) for row in result.all()
     }
 
-    ranked: List[Tuple[float, models.Track, models.TrackFeature, SharedGenres]] = []
+    seed_genre_count = len(seed_genres)
+    ranked: List[Tuple[float, float, models.Track, models.TrackFeature, SharedGenres, int]] = []
     for track_id, raw_score in matches:
         if track_id in exclude:
             continue
@@ -451,14 +633,19 @@ async def _hydrate_recommendations(
         track_obj, feature_obj = data
         candidate_genres = _collect_genres(track_obj.artists)
         genre_overlap = len(seed_genres & candidate_genres)
-        similarity = _compute_similarity_score(raw_score, genre_overlap)
-        ranked.append((similarity, track_obj, feature_obj, candidate_genres))
+        alignment = _compute_feature_alignment(seed_features, feature_obj.audio_features)
+        if alignment < MIN_ALIGNMENT_SCORE and genre_overlap == 0:
+            continue
+        similarity = _compute_similarity_score(raw_score, genre_overlap, seed_genre_count, alignment)
+        if similarity < MIN_ALIGNMENT_SCORE:
+            continue
+        ranked.append((similarity, alignment, track_obj, feature_obj, candidate_genres, genre_overlap))
 
-    ranked.sort(key=lambda item: item[0], reverse=True)
+    ranked.sort(key=lambda item: (item[5] > 0, item[0], item[1]), reverse=True)
 
     final: List[RecommendationItem] = []
     seen_artists: Set[str] = set()
-    for similarity, track_obj, feature_obj, candidate_genres in ranked:
+    for similarity, _, track_obj, feature_obj, candidate_genres, _ in ranked:
         if len(final) >= top_k:
             break
         artist_ids = {artist.id for artist in track_obj.artists}
@@ -470,6 +657,132 @@ async def _hydrate_recommendations(
     return final
 
 
+async def _collect_seen_artist_ids(session: AsyncSession, track_ids: Set[str]) -> Set[str]:
+    if not track_ids:
+        return set()
+    result = await session.execute(
+        select(models.Track)
+        .options(selectinload(models.Track.artists))
+        .where(models.Track.id.in_(track_ids))
+    )
+    seen: Set[str] = set()
+    for track in result.scalars():
+        seen.update(artist.id for artist in track.artists if artist.id)
+    return seen
+
+
+async def _backfill_with_spotify(
+    session: AsyncSession,
+    spotify_client: SpotifyClient,
+    index_service: FaissService,
+    settings: Settings,
+    *,
+    seed_track: models.Track,
+    seed_vector: np.ndarray,
+    seed_features: Dict[str, Any],
+    seed_genres: SharedGenres,
+    existing: List[RecommendationItem],
+    limit: int,
+) -> List[RecommendationItem]:
+    needed = limit - len(existing)
+    if needed <= 0:
+        return existing
+
+    existing_ids = {item.track_id for item in existing}
+    exclude_ids = existing_ids | {seed_track.id}
+    seen_artists = await _collect_seen_artist_ids(session, existing_ids)
+
+    artist_ids = [artist.id for artist in seed_track.artists if artist.id]
+    seed_genre_list = sorted(seed_genres)
+    tunable_params = _build_spotify_tunable_params(seed_features, seed_track=seed_track)
+
+    try:
+        rec_payload = await spotify_client.get_recommendations(
+            seed_tracks=[seed_track.id],
+            seed_artists=artist_ids[:2],
+            seed_genres=seed_genre_list[:2],
+            limit=min(max(needed * 2, needed + 2), settings.recommendation_max_limit * 2),
+            tunable_params=tunable_params,
+        )
+    except SpotifyClientError as exc:
+        logger.warning("Spotify fallback recommendations failed for %s: %s", seed_track.id, exc)
+        return existing
+
+    tracks_payload = rec_payload.get("tracks") if isinstance(rec_payload, dict) else None
+    if not tracks_payload:
+        return existing
+
+    seed_genre_count = len(seed_genres)
+    augmented: List[Tuple[int, float, RecommendationItem, Set[str]]] = []
+    for track_payload in tracks_payload:
+        track_id = track_payload.get("id") if isinstance(track_payload, dict) else None
+        if not track_id or track_id in exclude_ids:
+            continue
+        try:
+            candidate_track, candidate_vector, candidate_features, _ = await _ensure_track_vector(
+                session,
+                spotify_client,
+                index_service,
+                settings,
+                track_payload=track_payload,
+            )
+        except SpotifyClientError as exc:
+            logger.debug("Failed to ingest recommended track %s: %s", track_id, exc)
+            continue
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Unexpected error ingesting recommended track %s: %s", track_id, exc)
+            continue
+
+        track_with_relations = await _load_track_with_artists(session, candidate_track.id)
+        if track_with_relations is not None:
+            candidate_track = track_with_relations
+
+        candidate_genres = _collect_genres(candidate_track.artists)
+        raw_score = _cosine_similarity(seed_vector, candidate_vector)
+        genre_overlap = len(seed_genres & candidate_genres)
+        alignment = _compute_feature_alignment(seed_features, candidate_features)
+        if alignment < MIN_ALIGNMENT_SCORE and genre_overlap == 0:
+            continue
+        similarity = _compute_similarity_score(
+            raw_score,
+            genre_overlap,
+            seed_genre_count,
+            alignment,
+        )
+        if similarity < MIN_ALIGNMENT_SCORE:
+            continue
+        shared = seed_genres & candidate_genres
+        explanation = _build_explanation(seed_features, candidate_features, shared)
+
+        artist_ids_set = {artist.id for artist in candidate_track.artists if artist.id}
+        penalty = 0.08 if seen_artists & artist_ids_set else 0.0
+        adjusted = max(similarity - penalty, 0.0)
+
+        if seed_genres and genre_overlap == 0 and adjusted < 0.65:
+            # Skip obviously unrelated tracks when we know the seed genres
+            continue
+
+        item = _track_to_recommendation(candidate_track, adjusted, explanation)
+        augmented.append((genre_overlap, alignment, adjusted, item, artist_ids_set))
+
+    if not augmented:
+        return existing
+
+    augmented.sort(key=lambda entry: (entry[0] > 0, entry[0], entry[1], entry[2]), reverse=True)
+
+    final = list(existing)
+    for genre_overlap, _, adjusted, item, artist_ids_set in augmented:
+        if len(final) >= limit:
+            break
+        if item.track_id in exclude_ids:
+            continue
+        final.append(item)
+        exclude_ids.add(item.track_id)
+        seen_artists.update(artist_ids_set)
+
+    return final
+
+
 async def _process_playlist(
     playlist_id: str,
     *,
@@ -478,6 +791,7 @@ async def _process_playlist(
     spotify_client: SpotifyClient,
     index_service: FaissService,
     settings: Settings,
+    top_k: int,
 ) -> RecommendResponse:
     lock_key = f"playlist:{playlist_id}:ingest"
     lock_acquired = await redis.set(lock_key, "1", nx=True, ex=600)
@@ -572,7 +886,8 @@ async def _process_playlist(
         recommendations: List[RecommendationItem] = []
         if centroid is not None:
             await index_service.ensure_loaded(session)
-            matches = await index_service.search(centroid, top_k=settings.recommendation_top_k * 4)
+            search_k = max(top_k * 4, top_k)
+            matches = await index_service.search(centroid, top_k=search_k)
             exclude = set(track_ids)
             seed_genres = set(genre for genre, _ in seed_genres_counter.most_common(20))
             seed_features = _average_audio_features(feature_payloads)
@@ -582,7 +897,7 @@ async def _process_playlist(
                 exclude=exclude,
                 seed_features=seed_features,
                 seed_genres=seed_genres,
-                top_k=settings.recommendation_top_k,
+                top_k=top_k,
             )
 
         summary = PlaylistIngestSummary(
@@ -619,6 +934,7 @@ async def recommend_for_entity(
     spotify_client: SpotifyClient,
     index_service: FaissService,
     settings: Settings,
+    limit: int,
 ) -> RecommendResponse:
     await index_service.ensure_loaded(session)
 
@@ -636,7 +952,8 @@ async def recommend_for_entity(
         if track_with_relations is not None:
             track = track_with_relations
 
-        matches = await index_service.search(vector, top_k=settings.recommendation_top_k * 3)
+        search_k = max(limit * 3, limit)
+        matches = await index_service.search(vector, top_k=search_k)
         seed_genres = _collect_genres(track.artists)
         recommendations = await _hydrate_recommendations(
             session,
@@ -644,8 +961,21 @@ async def recommend_for_entity(
             exclude={track.id},
             seed_features=features,
             seed_genres=seed_genres,
-            top_k=settings.recommendation_top_k,
+            top_k=limit,
         )
+        if len(recommendations) < limit:
+            recommendations = await _backfill_with_spotify(
+                session,
+                spotify_client,
+                index_service,
+                settings,
+                seed_track=track,
+                seed_vector=vector,
+                seed_features=features,
+                seed_genres=seed_genres,
+                existing=recommendations,
+                limit=limit,
+            )
         response = RecommendResponse(
             type="track",
             seed_track=_track_to_seed(track),
@@ -662,6 +992,7 @@ async def recommend_for_entity(
             spotify_client=spotify_client,
             index_service=index_service,
             settings=settings,
+            top_k=limit,
         )
 
     raise ValueError(f"Unsupported entity type {entity.kind}")

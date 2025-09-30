@@ -9,6 +9,12 @@ from ..spotify.parsing import parse_spotify_url
 
 class RecommendRequest(BaseModel):
     url: str = Field(..., description="Spotify track or playlist URL/URI")
+    limit: int | None = Field(
+        None,
+        ge=1,
+        le=50,
+        description="Desired number of recommendations to return",
+    )
 
     @field_validator("url")
     @classmethod

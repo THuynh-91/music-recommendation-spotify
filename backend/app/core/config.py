@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     faiss_meta_path: Path = Path("/data/index.json")
     dsp_preview_timeout: int = 12
     recommendation_top_k: int = 15
+    recommendation_max_limit: int = 50
     playlist_ingest_batch_size: int = 75
     http_timeout_seconds: float = 15.0
     http_retries: int = 3

@@ -23,6 +23,7 @@ export function HomeClient({ signedIn }: { signedIn: boolean }) {
   const [profileLoading, setProfileLoading] = useState(false);
 
   const [inputUrl, setInputUrl] = useState("");
+  const [limit, setLimit] = useState(15);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<RecommendationResponse | null>(null);
@@ -66,7 +67,7 @@ export function HomeClient({ signedIn }: { signedIn: boolean }) {
     try {
       setLoading(true);
       setError(null);
-      const data = await requestRecommendations(inputUrl.trim());
+      const data = await requestRecommendations(inputUrl.trim(), limit);
       setResult(data);
       setHistory((prev) => [data, ...prev].slice(0, MAX_HISTORY));
     } catch (err: unknown) {
@@ -134,6 +135,22 @@ export function HomeClient({ signedIn }: { signedIn: boolean }) {
             value={inputUrl}
             onChange={(event) => setInputUrl(event.target.value)}
             required
+            disabled={loading}
+          />
+          <label htmlFor="limit">How many recommendations?</label>
+          <input
+            id="limit"
+            type="number"
+            min={1}
+            max={50}
+            value={limit}
+            onChange={(event) => {
+              const parsed = Number(event.target.value);
+              if (!Number.isNaN(parsed)) {
+                const clamped = Math.min(Math.max(Math.trunc(parsed), 1), 50);
+                setLimit(clamped);
+              }
+            }}
             disabled={loading}
           />
           <button className="cta" type="submit" disabled={loading}>

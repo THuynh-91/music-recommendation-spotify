@@ -10,6 +10,7 @@ import type { SpotifyTokenResponse } from "@/lib/server-auth";
 
 interface RecommendRequestBody {
   url?: string;
+  limit?: number;
 }
 
 const DEFAULT_BACKEND_URL = "http://127.0.0.1:8000";
@@ -40,6 +41,15 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "missing_url" }, { status: 400 });
     }
 
+    const limit =
+      typeof payload.limit === "number"
+        ? Math.min(Math.max(Math.trunc(payload.limit), 1), 50)
+        : undefined;
+    const requestBody: RecommendRequestBody = { url: payload.url };
+    if (typeof limit === "number") {
+      requestBody.limit = limit;
+    }
+
     const serviceToken = process.env.RECOMMENDER_SERVICE_TOKEN;
     if (!serviceToken) {
       return NextResponse.json({ error: "misconfigured_service_token" }, { status: 500 });
@@ -54,7 +64,7 @@ export async function POST(req: Request) {
     const cookieStore = cookies();
     let accessToken = initialToken;
     let tokensToPersist: SpotifyTokenResponse | undefined = refreshedTokens;
-    let backendResponse = await callBackend(backendBase, serviceToken, accessToken, payload);
+    let backendResponse = await callBackend(backendBase, serviceToken, accessToken, requestBody);
 
     if (backendResponse.status === 401) {
       const refreshToken = tokensToPersist?.refresh_token || cookieStore.get("sp_refresh_token")?.value || null;
@@ -62,7 +72,7 @@ export async function POST(req: Request) {
         const newTokens = await refreshSpotifyTokens(refreshToken);
         tokensToPersist = newTokens;
         accessToken = newTokens.access_token;
-        backendResponse = await callBackend(backendBase, serviceToken, accessToken, payload);
+        backendResponse = await callBackend(backendBase, serviceToken, accessToken, requestBody);
       }
     }
 

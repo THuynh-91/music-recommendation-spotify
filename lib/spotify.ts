@@ -49,11 +49,15 @@ export type SpotifyProfile = {
   email?: string;
 };
 
-export async function requestRecommendations(url: string): Promise<RecommendationResponse> {
+export async function requestRecommendations(url: string, limit?: number): Promise<RecommendationResponse> {
+  const payload: { url: string; limit?: number } = { url };
+  if (typeof limit === "number") {
+    payload.limit = limit;
+  }
   const res = await fetch("/api/recommend", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify(payload),
   });
   const data = await res.json();
   if (!res.ok) {
