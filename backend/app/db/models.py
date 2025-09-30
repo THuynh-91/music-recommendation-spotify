@@ -58,8 +58,8 @@ class Track(Base):
     image_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    album: Mapped[Album | None] = relationship(back_populates="tracks")
-    artists: Mapped[list[Artist]] = relationship(back_populates="tracks", secondary=track_artists)
+    album: Mapped[Album | None] = relationship(back_populates="tracks", lazy="selectin")
+    artists: Mapped[list[Artist]] = relationship(back_populates="tracks", secondary=track_artists, lazy="selectin")
     features: Mapped[TrackFeature | None] = relationship(back_populates="track", uselist=False)
 
 
@@ -103,3 +103,4 @@ class PlaylistTrack(Base):
 
     playlist: Mapped[Playlist] = relationship(back_populates="tracks")
     track: Mapped[Track] = relationship()
+

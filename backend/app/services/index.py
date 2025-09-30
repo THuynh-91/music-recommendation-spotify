@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
@@ -14,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.config import Settings, get_settings
 from ..db import models
 
+
+logger = logging.getLogger("faiss")
 
 class FaissService:
     def __init__(self, settings: Settings | None = None) -> None:
@@ -28,7 +31,8 @@ class FaissService:
     @staticmethod
     def _track_key(track_id: str) -> int:
         digest = hashlib.blake2b(track_id.encode("utf-8"), digest_size=8).digest()
-        return int.from_bytes(digest, byteorder="big", signed=False)
+        value = int.from_bytes(digest, byteorder="big", signed=False)
+        return value & 0x7FFFFFFFFFFFFFFF
 
     def _ensure_index(self, dim: int) -> None:
         if self.index is None:
@@ -146,14 +150,17 @@ class FaissService:
             return
         index_path = Path(self.settings.faiss_index_path)
         meta_path = Path(self.settings.faiss_meta_path)
-        index_path.parent.mkdir(parents=True, exist_ok=True)
-        meta_path.parent.mkdir(parents=True, exist_ok=True)
-        faiss.write_index(self.index, str(index_path))  # type: ignore[arg-type]
-        meta = {
-            "id_to_track": {str(k): v for k, v in self.id_to_track.items()},
-            "dim": self.dim,
-        }
-        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        try:
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            meta_path.parent.mkdir(parents=True, exist_ok=True)
+            faiss.write_index(self.index, str(index_path))  # type: ignore[arg-type]
+            meta = {
+                "id_to_track": {str(k): v for k, v in self.id_to_track.items()},
+                "dim": self.dim,
+            }
+            meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        except Exception as exc:  # pragma: no cover - filesystem issues
+            logger.warning("Failed to persist FAISS index to %s: %s", index_path, exc)
 
 
 faiss_service = FaissService()
@@ -161,3 +168,4 @@ faiss_service = FaissService()
 
 async def get_faiss_service() -> FaissService:
     return faiss_service
+

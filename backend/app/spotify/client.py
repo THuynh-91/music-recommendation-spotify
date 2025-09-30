@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, Iterable, List
 
 import httpx
 
+from ..core.config import Settings
+
 API_BASE = "https://api.spotify.com/v1"
-TOKEN_BASE = "https://accounts.spotify.com"
+TOKEN_ENDPOINT = "https://accounts.spotify.com/api/token"
 
 
 class SpotifyClientError(Exception):
@@ -23,6 +27,9 @@ class SpotifyClient:
     access_token: str
     timeout: float = 15.0
     retries: int = 3
+    settings: Settings | None = None
+    _client: httpx.AsyncClient | None = field(init=False, repr=False, default=None)
+    _app_token: tuple[str, float] | None = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         self._client = httpx.AsyncClient(
@@ -32,7 +39,66 @@ class SpotifyClient:
         )
 
     async def close(self) -> None:
-        await self._client.aclose()
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def _ensure_app_token(self) -> str:
+        if not self.settings:
+            raise SpotifyClientError("application settings not available for client credentials")
+        client_id = self.settings.spotify_client_id
+        client_secret = self.settings.spotify_client_secret
+        if not client_id or not client_secret:
+            raise SpotifyClientError("missing spotify client credentials")
+
+        if self._app_token and self._app_token[1] > time.time():
+            return self._app_token[0]
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.post(
+                TOKEN_ENDPOINT,
+                data={"grant_type": "client_credentials"},
+                auth=(client_id, client_secret),
+            )
+        data = resp.json()
+        if resp.status_code != 200 or "access_token" not in data:
+            raise SpotifyClientError(f"failed to obtain client credentials token: {resp.status_code} {data}")
+        expires = time.time() + float(data.get("expires_in", 3600)) - 30
+        token = data["access_token"]
+        self._app_token = (token, expires)
+        return token
+
+    async def _request_with_app_token(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        token = await self._ensure_app_token()
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        endpoint = url
+        query_params = params or {}
+        single_audio_feature = False
+
+        if url.startswith("/audio-features/"):
+            track_id = url.rsplit("/", 1)[-1]
+            endpoint = "/audio-features"
+            query_params = {"ids": track_id}
+            single_audio_feature = True
+
+        async with httpx.AsyncClient(base_url=API_BASE, headers=headers, timeout=self.timeout) as client:
+            resp = await client.request(method, endpoint, params=query_params)
+
+        if resp.status_code >= 400:
+            raise SpotifyClientError(f"spotify app-token api error {resp.status_code}: {resp.text}")
+        if not resp.content:
+            return {}
+        payload = resp.json()
+        if single_audio_feature:
+            features = payload.get("audio_features") or []
+            return features[0] if features else {}
+        return payload
 
     async def _request(
         self,
@@ -41,11 +107,16 @@ class SpotifyClient:
         *,
         params: Dict[str, Any] | None = None,
         json: Dict[str, Any] | None = None,
-        base_url: str = API_BASE,
     ) -> Dict[str, Any]:
+        client = self._client
+        if client is None:
+            raise SpotifyClientError("spotify client not initialized")
+
+        logger = logging.getLogger("spotify.client")
+
         for attempt in range(1, self.retries + 1):
             try:
-                response = await self._client.request(method, url, params=params, json=json, base_url=base_url)
+                response = await client.request(method, url, params=params, json=json)
             except httpx.RequestError as exc:  # network issue
                 if attempt == self.retries:
                     raise SpotifyClientError(f"network error: {exc}") from exc
@@ -60,8 +131,18 @@ class SpotifyClient:
                 await asyncio.sleep(retry_after)
                 continue
 
+            if response.status_code == 403 and method == "GET" and any(
+                url.startswith(path) for path in ("/audio-features", "/audio-analysis")
+            ):
+                try:
+                    return await self._request_with_app_token(method, url, params=params)
+                except SpotifyClientError as app_exc:
+                    logger.error("Client credentials fallback failed for %s %s: %s", method, url, app_exc)
+                    raise
+
             if response.status_code >= 400:
                 detail = response.text
+                logger.error("Spotify API %s %s -> %s %s", method, url, response.status_code, detail)
                 raise SpotifyClientError(f"spotify api error {response.status_code}: {detail}")
 
             if response.content:

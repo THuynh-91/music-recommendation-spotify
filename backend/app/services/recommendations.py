@@ -4,10 +4,12 @@ from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+import logging
 import numpy as np
 from redis.asyncio import Redis
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ..core.config import Settings
 from ..db import models
@@ -20,7 +22,7 @@ from ..schemas.recommend import (
 )
 from ..services.features import build_feature_vector, compute_dsp_features
 from ..services.index import FaissService
-from ..spotify.client import SpotifyClient
+from ..spotify.client import SpotifyClient, SpotifyClientError
 from ..spotify.parsing import SpotifyEntity
 
 AUDIO_FEATURE_KEYS = [
@@ -38,6 +40,99 @@ AUDIO_FEATURE_KEYS = [
 
 SharedGenres = Set[str]
 
+
+async def _load_track_with_artists(session: AsyncSession, track_id: str) -> Optional[models.Track]:
+    result = await session.execute(
+        select(models.Track).options(selectinload(models.Track.artists), selectinload(models.Track.album)).where(models.Track.id == track_id)
+    )
+    return result.scalars().first()
+
+
+
+logger = logging.getLogger("recommendations")
+
+DEFAULT_AUDIO_FEATURE_BASE = {
+    "danceability": 0.55,
+    "energy": 0.6,
+    "speechiness": 0.05,
+    "acousticness": 0.25,
+    "instrumentalness": 0.0,
+    "liveness": 0.18,
+    "valence": 0.5,
+    "tempo": 120.0,
+    "key": -1.0,
+    "mode": 1.0,
+    "loudness": -11.0,
+}
+
+DEFAULT_AUDIO_ANALYSIS_TRACK = {
+    "tempo_confidence": 0.0,
+    "time_signature": 4.0,
+    "time_signature_confidence": 0.0,
+    "key_confidence": 0.0,
+}
+
+
+def _fallback_audio_features(track_payload: Dict[str, Any] | None) -> Dict[str, float]:
+    fallback = DEFAULT_AUDIO_FEATURE_BASE.copy()
+    duration = 0.0
+    if isinstance(track_payload, dict):
+        try:
+            duration = float(track_payload.get("duration_ms") or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
+    fallback["duration_ms"] = duration
+    return fallback
+
+
+def _normalize_audio_features(track_id: str, raw_features: Dict[str, Any] | None, track_payload: Dict[str, Any] | None) -> Tuple[Dict[str, Any], bool]:
+    fallback = _fallback_audio_features(track_payload)
+    sanitized: Dict[str, Any] = dict(raw_features or {})
+    sanitized.setdefault("id", track_id)
+    used_defaults = False
+    for key, default in fallback.items():
+        value = sanitized.get(key)
+        if value is None:
+            sanitized[key] = default
+            used_defaults = True
+            continue
+        if isinstance(value, (int, float)):
+            continue
+        try:
+            sanitized[key] = float(value)
+        except (TypeError, ValueError):
+            sanitized[key] = default
+            used_defaults = True
+    return sanitized, used_defaults
+
+
+def _normalize_audio_analysis(raw_analysis: Dict[str, Any] | None) -> Tuple[Dict[str, Any], bool]:
+    sanitized: Dict[str, Any] = dict(raw_analysis or {})
+    track_meta = dict(sanitized.get("track") or {})
+    used_defaults = False
+    for key, default in DEFAULT_AUDIO_ANALYSIS_TRACK.items():
+        value = track_meta.get(key)
+        if value is None:
+            track_meta[key] = default
+            used_defaults = True
+            continue
+        if isinstance(value, (int, float)):
+            try:
+                track_meta[key] = float(value)
+            except (TypeError, ValueError):
+                track_meta[key] = default
+                used_defaults = True
+            continue
+        try:
+            track_meta[key] = float(value)
+        except (TypeError, ValueError):
+            track_meta[key] = default
+            used_defaults = True
+    sanitized["track"] = track_meta
+    if not isinstance(sanitized.get("sections"), list):
+        sanitized["sections"] = []
+        used_defaults = True
+    return sanitized, used_defaults
 
 def _first_image(images: Iterable[Dict[str, Any]] | None) -> Optional[str]:
     if not images:
@@ -258,17 +353,41 @@ async def _ensure_track_vector(
         track_payload = await spotify_client.get_track(track_id)
     track = await _upsert_track(session, track_payload, spotify_client)
 
-    if audio_features is None:
-        audio_features = await spotify_client.get_audio_features(track_id)
-    if audio_analysis is None:
-        audio_analysis = await spotify_client.get_audio_analysis(track_id)
+    features_source = audio_features
+    if features_source is None:
+        try:
+            features_source = await spotify_client.get_audio_features(track_id)
+        except SpotifyClientError as exc:
+            logger.warning("Audio features unavailable for %s: %s", track_id, exc)
+            features_source = {}
+    features_payload, features_defaulted = _normalize_audio_features(track_id, features_source, track_payload)
+
+    analysis_source = audio_analysis
+    if analysis_source is None:
+        try:
+            analysis_source = await spotify_client.get_audio_analysis(track_id)
+        except SpotifyClientError as exc:
+            logger.warning("Audio analysis unavailable for %s: %s", track_id, exc)
+            analysis_source = {}
+    analysis_payload, analysis_defaulted = _normalize_audio_analysis(analysis_source)
+    if features_defaulted:
+        logger.debug("Using fallback audio features for %s", track_id)
+    if analysis_defaulted:
+        logger.debug("Using fallback audio analysis for %s", track_id)
 
     dsp_features: Dict[str, Any] | None = await compute_dsp_features(track.preview_url, timeout=settings.dsp_preview_timeout)
-    vector = build_feature_vector(audio_features, audio_analysis, dsp_features)
-    await _upsert_track_feature(session, track, vector, audio_features, audio_analysis, dsp_features)
+    vector = build_feature_vector(features_payload, analysis_payload, dsp_features)
+    if not np.any(vector):
+        vector = np.zeros_like(vector)
+        if vector.size:
+            vector[0] = 1.0
+    await _upsert_track_feature(session, track, vector, features_payload, analysis_payload, dsp_features)
     if update_index:
-        await index_service.add_vectors([(track.id, vector)])
-    return track, vector, audio_features, True
+        try:
+            await index_service.add_vectors([(track.id, vector)])
+        except Exception as exc:
+            logger.warning("Failed to update FAISS index for %s: %s", track_id, exc)
+    return track, vector, features_payload, True
 
 
 def _track_to_seed(track: models.Track) -> SeedTrack:
@@ -387,8 +506,20 @@ async def _process_playlist(
             position += 1
 
         track_ids = [payload.get("id") for _, payload in items]
-        audio_features_list = await spotify_client.get_audio_features_bulk(track_ids)
-        audio_features_map = {item.get("id"): item for item in audio_features_list if item and item.get("id")}
+        if track_ids:
+            try:
+                audio_features_list = await spotify_client.get_audio_features_bulk(track_ids)
+            except SpotifyClientError as exc:
+                logger.warning("Bulk audio feature fetch failed for playlist %s: %s", playlist_id, exc)
+                audio_features_list = [{} for _ in track_ids]
+        else:
+            audio_features_list = []
+        audio_features_map: Dict[str, Dict[str, Any]] = {}
+        for idx, track_id in enumerate(track_ids):
+            raw_features = audio_features_list[idx] if idx < len(audio_features_list) else {}
+            track_payload = items[idx][1]
+            normalized, _ = _normalize_audio_features(track_id, raw_features, track_payload)
+            audio_features_map[track_id] = normalized
 
         vectors: List[np.ndarray] = []
         feature_payloads: List[Dict[str, Any]] = []
@@ -493,16 +624,17 @@ async def recommend_for_entity(
 
     if entity.kind == "track":
         track_payload = await spotify_client.get_track(entity.id)
-        audio_features = await spotify_client.get_audio_features(entity.id)
         track, vector, features, _ = await _ensure_track_vector(
             session,
             spotify_client,
             index_service,
             settings,
             track_payload=track_payload,
-            audio_features=audio_features,
         )
-        await session.commit()
+
+        track_with_relations = await _load_track_with_artists(session, track.id)
+        if track_with_relations is not None:
+            track = track_with_relations
 
         matches = await index_service.search(vector, top_k=settings.recommendation_top_k * 3)
         seed_genres = _collect_genres(track.artists)
@@ -514,11 +646,13 @@ async def recommend_for_entity(
             seed_genres=seed_genres,
             top_k=settings.recommendation_top_k,
         )
-        return RecommendResponse(
+        response = RecommendResponse(
             type="track",
             seed_track=_track_to_seed(track),
             recommendations=recommendations,
         )
+        await session.commit()
+        return response
 
     if entity.kind == "playlist":
         return await _process_playlist(
@@ -531,3 +665,5 @@ async def recommend_for_entity(
         )
 
     raise ValueError(f"Unsupported entity type {entity.kind}")
+
+

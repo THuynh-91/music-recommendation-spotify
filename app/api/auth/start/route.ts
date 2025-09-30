@@ -1,4 +1,4 @@
-﻿import { NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 
 function randomString(len = 64) {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
@@ -36,13 +36,25 @@ export async function GET() {
   const statePayload = { v: verifier, n: nonce };
   const state = base64urlEncode(JSON.stringify(statePayload));
 
+  const scope = [
+    "user-read-email",
+    "user-read-private",
+    "playlist-read-private",
+    "playlist-read-collaborative",
+    "user-library-read",
+    "user-read-recently-played",
+    "user-top-read",
+  ].join(" ");
+
   const params = new URLSearchParams({
     client_id: clientId,
     response_type: "code",
     redirect_uri: redirectUri,
+    scope,
     code_challenge_method: "S256",
     code_challenge: challenge,
     state,
+    show_dialog: "true",
   });
 
   const isProd = process.env.NODE_ENV === "production";
