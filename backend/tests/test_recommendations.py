@@ -55,6 +55,7 @@ class _StubSpotifyClient:
     analysis: Dict[str, Dict[str, Any]]
     artists: Dict[str, Dict[str, Any]]
     recommendations: List[Dict[str, Any]]
+    related: Dict[str, List[Dict[str, Any]]] | None = None
     last_request: Dict[str, Any] | None = None
 
     async def get_track(self, track_id: str) -> Dict[str, Any]:
@@ -68,6 +69,12 @@ class _StubSpotifyClient:
 
     async def get_artists(self, artist_ids: Iterable[str]) -> List[Dict[str, Any]]:
         return [self.artists[artist_id] for artist_id in artist_ids if artist_id in self.artists]
+
+    async def get_related_artists(self, artist_id: str) -> Dict[str, Any]:
+        related = []
+        if self.related and artist_id in self.related:
+            related = list(self.related[artist_id])
+        return {"artists": related}
 
     async def get_recommendations(
         self,
@@ -212,6 +219,14 @@ async def _run_backfill_flow(tmp_path: Path) -> None:
                     ],
                 }
             ],
+            related={
+                seed_artist_id: [
+                    {
+                        "id": rec_artist_id,
+                        "name": "Rec Artist",
+                    }
+                ]
+            },
         )
 
         settings = Settings(
@@ -241,8 +256,10 @@ async def _run_backfill_flow(tmp_path: Path) -> None:
             seed_vector=seed_vector,
             seed_features=seed_features,
             seed_genres={"viet r&b"},
+            seed_genre_priority=["viet r&b"],
             existing=[],
             limit=3,
+            extra_seed_artists=[rec_artist_id],
         )
 
         assert any(item.track_id == recommendation_id for item in recommendations)
@@ -260,6 +277,9 @@ def test_spotify_backfill_ingests_unseen_tracks(tmp_path: Path) -> None:
     stub_client = asyncio.run(_run_backfill_flow(tmp_path))
     assert stub_client.last_request is not None
     params = stub_client.last_request["tunable_params"]
+    seed_artists = stub_client.last_request["seed_artists"]
+    assert seed_artists[0] == "seed-artist"
+    assert "rec-artist" in seed_artists
     assert pytest.approx(params["target_tempo"], rel=0.0, abs=0.01) == 96.0
     assert params["min_tempo"] < params["target_tempo"] < params["max_tempo"]
     assert pytest.approx(params["target_danceability"], rel=0.0, abs=0.001) == 0.62

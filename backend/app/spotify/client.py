@@ -172,6 +172,11 @@ class SpotifyClient:
             artists.extend(data.get("artists", []))
         return artists
 
+    async def get_related_artists(self, artist_id: str) -> Dict[str, Any]:
+        if not artist_id:
+            return {"artists": []}
+        return await self._request("GET", f"/artists/{artist_id}/related-artists")
+
     async def get_audio_features(self, track_id: str) -> Dict[str, Any]:
         return await self._request("GET", f"/audio-features/{track_id}")
 

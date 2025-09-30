@@ -671,6 +671,38 @@ async def _collect_seen_artist_ids(session: AsyncSession, track_ids: Set[str]) -
     return seen
 
 
+async def _expand_artist_seeds(
+    spotify_client: SpotifyClient,
+    base_artist_ids: Sequence[str],
+    *,
+    limit: int = 3,
+) -> List[str]:
+    if limit <= 0:
+        return []
+    ordered_ids = [artist_id for artist_id in base_artist_ids if artist_id]
+    if not ordered_ids:
+        return []
+    extras: List[str] = []
+    seen: Set[str] = set(ordered_ids)
+    for artist_id in ordered_ids[:5]:
+        try:
+            payload = await spotify_client.get_related_artists(artist_id)
+        except SpotifyClientError:
+            continue
+        related = payload.get("artists") if isinstance(payload, dict) else None
+        if not isinstance(related, list):
+            continue
+        for artist_payload in related:
+            related_id = artist_payload.get("id") if isinstance(artist_payload, dict) else None
+            if not related_id or related_id in seen:
+                continue
+            extras.append(related_id)
+            seen.add(related_id)
+            if len(extras) >= limit:
+                return extras
+    return extras
+
+
 async def _backfill_with_spotify(
     session: AsyncSession,
     spotify_client: SpotifyClient,
@@ -681,6 +713,7 @@ async def _backfill_with_spotify(
     seed_vector: np.ndarray,
     seed_features: Dict[str, Any],
     seed_genres: SharedGenres,
+    seed_genre_priority: Sequence[str] | None = None,
     existing: List[RecommendationItem],
     limit: int,
     additional_exclude: Optional[Set[str]] = None,
@@ -702,14 +735,17 @@ async def _backfill_with_spotify(
         for artist_id in extra_seed_artists:
             if artist_id and artist_id not in artist_ids:
                 artist_ids.append(artist_id)
-    seed_genre_list = sorted(seed_genres)
+    if seed_genre_priority:
+        seed_genre_list = [genre for genre in seed_genre_priority if genre]
+    else:
+        seed_genre_list = sorted(seed_genres)
     tunable_params = _build_spotify_tunable_params(seed_features, seed_track=seed_track)
 
     try:
         rec_payload = await spotify_client.get_recommendations(
             seed_tracks=[seed_track.id] + list((extra_seed_tracks or [])[:4]),
             seed_artists=artist_ids[:5],
-            seed_genres=seed_genre_list[:2],
+            seed_genres=seed_genre_list[:5],
             limit=min(max(needed * 2, needed + 2), settings.recommendation_max_limit * 2),
             tunable_params=tunable_params,
         )
@@ -722,7 +758,8 @@ async def _backfill_with_spotify(
         return existing
 
     seed_genre_count = len(seed_genres)
-    augmented: List[Tuple[int, float, RecommendationItem, Set[str]]] = []
+    on_genre: List[Tuple[int, float, float, RecommendationItem, Set[str]]] = []
+    off_genre: List[Tuple[int, float, float, RecommendationItem, Set[str]]] = []
     for track_payload in tracks_payload:
         track_id = track_payload.get("id") if isinstance(track_payload, dict) else None
         if not track_id or track_id in exclude_ids:
@@ -767,27 +804,33 @@ async def _backfill_with_spotify(
         penalty = 0.08 if seen_artists & artist_ids_set else 0.0
         adjusted = max(similarity - penalty, 0.0)
 
-        if seed_genres and genre_overlap == 0 and adjusted < 0.65:
-            # Skip obviously unrelated tracks when we know the seed genres
-            continue
-
         item = _track_to_recommendation(candidate_track, adjusted, explanation)
-        augmented.append((genre_overlap, alignment, adjusted, item, artist_ids_set))
+        if genre_overlap > 0:
+            on_genre.append((genre_overlap, alignment, adjusted, item, artist_ids_set))
+        else:
+            off_genre.append((genre_overlap, alignment, adjusted, item, artist_ids_set))
 
-    if not augmented:
+    if not on_genre and not off_genre:
         return existing
 
-    augmented.sort(key=lambda entry: (entry[0] > 0, entry[0], entry[1], entry[2]), reverse=True)
+    on_genre.sort(key=lambda entry: (entry[0], entry[1], entry[2]), reverse=True)
+    off_genre.sort(key=lambda entry: (entry[1], entry[2]), reverse=True)
 
     final = list(existing)
-    for genre_overlap, _, adjusted, item, artist_ids_set in augmented:
+    for bucket, require_overlap in ((on_genre, True), (off_genre, False)):
+        for genre_overlap, alignment, adjusted, item, artist_ids_set in bucket:
+            if len(final) >= limit:
+                break
+            if item.track_id in exclude_ids:
+                continue
+            if not require_overlap and seed_genres:
+                if adjusted < 0.72 or alignment < 0.5:
+                    continue
+            final.append(item)
+            exclude_ids.add(item.track_id)
+            seen_artists.update(artist_ids_set)
         if len(final) >= limit:
             break
-        if item.track_id in exclude_ids:
-            continue
-        final.append(item)
-        exclude_ids.add(item.track_id)
-        seen_artists.update(artist_ids_set)
 
     return final
 
@@ -904,13 +947,16 @@ async def _process_playlist(
         recommendations: List[RecommendationItem] = []
         seed_features_avg = _average_audio_features(feature_payloads)
         seed_genres = set(genre for genre, _ in seed_genres_counter.most_common(20))
+        seed_genre_priority = [genre for genre, _ in seed_genres_counter.most_common(5)]
 
         if primary_track is not None and (centroid is not None or primary_vector is not None):
             seed_vector = centroid if centroid is not None else primary_vector
             if seed_vector is not None:
                 seed_features_payload = seed_features_avg or dict(primary_features or {})
                 extra_track_seeds = [tid for tid in track_ids if tid and tid != primary_track.id][:4]
-                extra_artist_seeds = [artist_id for artist_id, _ in artist_counter.most_common(4) if artist_id]
+                dominant_artist_ids = [artist_id for artist_id, _ in artist_counter.most_common(6) if artist_id]
+                related_artist_ids = await _expand_artist_seeds(spotify_client, dominant_artist_ids, limit=4)
+                merged_artist_seeds = list(dict.fromkeys(dominant_artist_ids + related_artist_ids))
                 recommendations = await _backfill_with_spotify(
                     session,
                     spotify_client,
@@ -920,11 +966,12 @@ async def _process_playlist(
                     seed_vector=seed_vector,
                     seed_features=seed_features_payload,
                     seed_genres=seed_genres,
+                    seed_genre_priority=seed_genre_priority,
                     existing=[],
                     limit=top_k,
                     additional_exclude=set(track_ids),
                     extra_seed_tracks=extra_track_seeds,
-                    extra_seed_artists=extra_artist_seeds,
+                    extra_seed_artists=merged_artist_seeds,
                 )
 
         summary = PlaylistIngestSummary(
@@ -979,7 +1026,15 @@ async def recommend_for_entity(
         if track_with_relations is not None:
             track = track_with_relations
 
-        seed_genres = _collect_genres(track.artists)
+        base_artist_ids = [artist.id for artist in track.artists if artist.id]
+        seed_genre_counter: Counter[str] = Counter()
+        for artist in track.artists:
+            if artist.genres:
+                normalized_genres = [genre.lower() for genre in artist.genres if genre]
+                seed_genre_counter.update(normalized_genres)
+        seed_genres = set(seed_genre_counter.keys())
+        seed_genre_priority = [genre for genre, _ in seed_genre_counter.most_common(5)]
+        extra_seed_artists = await _expand_artist_seeds(spotify_client, base_artist_ids)
         recommendations = await _backfill_with_spotify(
             session,
             spotify_client,
@@ -989,8 +1044,10 @@ async def recommend_for_entity(
             seed_vector=vector,
             seed_features=features,
             seed_genres=seed_genres,
+            seed_genre_priority=seed_genre_priority,
             existing=[],
             limit=limit,
+            extra_seed_artists=extra_seed_artists,
         )
         response = RecommendResponse(
             type="track",
