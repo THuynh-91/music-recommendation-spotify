@@ -52,6 +52,19 @@ TEMPO_RANGE = (30.0, 220.0, 8.0)
 LOUDNESS_RANGE = (-60.0, 0.0, 5.0)
 DURATION_RANGE = (30000.0, 600000.0, 20000.0)
 
+FEATURE_ALIGNMENT_RULES: Sequence[Tuple[str, float, float]] = (
+    ("danceability", 0.18, 1.0),
+    ("energy", 0.22, 1.0),
+    ("valence", 0.22, 0.95),
+    ("acousticness", 0.28, 0.7),
+    ("instrumentalness", 0.3, 0.55),
+    ("speechiness", 0.18, 0.4),
+)
+TEMPO_ALIGNMENT_TOLERANCE = 18.0
+LOUDNESS_ALIGNMENT_TOLERANCE = 6.0
+DURATION_ALIGNMENT_TOLERANCE = 60000.0
+MIN_ALIGNMENT_SCORE = 0.38
+
 SharedGenres = Set[str]
 
 
@@ -347,17 +360,87 @@ def _build_spotify_tunable_params(
     return params
 
 
-def _compute_similarity_score(raw_score: float, genre_overlap: int, seed_genre_count: int) -> float:
+def _compute_feature_alignment(
+    seed_features: Dict[str, Any],
+    candidate_features: Dict[str, Any],
+) -> float:
+    score = 0.0
+    total_weight = 0.0
+
+    for field, tolerance, weight in FEATURE_ALIGNMENT_RULES:
+        seed_value = _coerce_float(seed_features.get(field))
+        candidate_value = _coerce_float(candidate_features.get(field))
+        if seed_value is None or candidate_value is None:
+            continue
+        diff = abs(seed_value - candidate_value)
+        closeness = max(0.0, 1.0 - min(diff / tolerance, 1.0))
+        score += closeness * weight
+        total_weight += weight
+
+    tempo_seed = _coerce_float(seed_features.get("tempo"))
+    tempo_candidate = _coerce_float(candidate_features.get("tempo"))
+    if tempo_seed is not None and tempo_candidate is not None:
+        tempo_diff = abs(tempo_seed - tempo_candidate)
+        closeness = max(0.0, 1.0 - min(tempo_diff / TEMPO_ALIGNMENT_TOLERANCE, 1.0))
+        score += closeness * 1.1
+        total_weight += 1.1
+
+    loudness_seed = _coerce_float(seed_features.get("loudness"))
+    loudness_candidate = _coerce_float(candidate_features.get("loudness"))
+    if loudness_seed is not None and loudness_candidate is not None:
+        loudness_diff = abs(loudness_seed - loudness_candidate)
+        closeness = max(0.0, 1.0 - min(loudness_diff / LOUDNESS_ALIGNMENT_TOLERANCE, 1.0))
+        score += closeness * 0.6
+        total_weight += 0.6
+
+    duration_seed = _coerce_float(seed_features.get("duration_ms"))
+    duration_candidate = _coerce_float(candidate_features.get("duration_ms"))
+    if duration_seed is not None and duration_candidate is not None:
+        duration_diff = abs(duration_seed - duration_candidate)
+        closeness = max(0.0, 1.0 - min(duration_diff / DURATION_ALIGNMENT_TOLERANCE, 1.0))
+        score += closeness * 0.6
+        total_weight += 0.6
+
+    mode_seed = _coerce_float(seed_features.get("mode"))
+    mode_candidate = _coerce_float(candidate_features.get("mode"))
+    if mode_seed is not None and mode_candidate is not None:
+        same_mode = 1.0 if int(round(mode_seed)) == int(round(mode_candidate)) else 0.0
+        score += same_mode * 0.3
+        total_weight += 0.3
+
+    key_seed = _coerce_float(seed_features.get("key"))
+    key_candidate = _coerce_float(candidate_features.get("key"))
+    if key_seed is not None and key_candidate is not None:
+        seed_int = int(round(key_seed)) % 12
+        candidate_int = int(round(key_candidate)) % 12
+        distance = abs(seed_int - candidate_int)
+        distance = min(distance, 12 - distance)
+        closeness = max(0.0, 1.0 - min(distance / 4.0, 1.0))
+        score += closeness * 0.4
+        total_weight += 0.4
+
+    if total_weight == 0.0:
+        return 0.5
+    return max(min(score / total_weight, 1.0), 0.0)
+
+
+def _compute_similarity_score(
+    raw_score: float,
+    genre_overlap: int,
+    seed_genre_count: int,
+    feature_alignment: float,
+) -> float:
     base = max(min((raw_score + 1.0) / 2.0, 1.0), 0.0)
+    combined = (base * 0.6) + (feature_alignment * 0.4)
     if seed_genre_count > 0:
         if genre_overlap > 0:
-            boost = 0.06 + max(genre_overlap - 1, 0) * 0.04
-            base += min(boost, 0.22)
+            boost = 0.07 + max(genre_overlap - 1, 0) * 0.035
+            combined += min(boost, 0.2)
         else:
-            base -= 0.18
+            combined -= 0.24
     elif genre_overlap > 0:
-        base += min(genre_overlap * 0.03, 0.1)
-    return max(min(base, 1.0), 0.0)
+        combined += min(genre_overlap * 0.03, 0.09)
+    return max(min(combined, 1.0), 0.0)
 
 
 def _build_explanation(
@@ -540,7 +623,7 @@ async def _hydrate_recommendations(
     }
 
     seed_genre_count = len(seed_genres)
-    ranked: List[Tuple[float, models.Track, models.TrackFeature, SharedGenres, int]] = []
+    ranked: List[Tuple[float, float, models.Track, models.TrackFeature, SharedGenres, int]] = []
     for track_id, raw_score in matches:
         if track_id in exclude:
             continue
@@ -550,14 +633,19 @@ async def _hydrate_recommendations(
         track_obj, feature_obj = data
         candidate_genres = _collect_genres(track_obj.artists)
         genre_overlap = len(seed_genres & candidate_genres)
-        similarity = _compute_similarity_score(raw_score, genre_overlap, seed_genre_count)
-        ranked.append((similarity, track_obj, feature_obj, candidate_genres, genre_overlap))
+        alignment = _compute_feature_alignment(seed_features, feature_obj.audio_features)
+        if alignment < MIN_ALIGNMENT_SCORE and genre_overlap == 0:
+            continue
+        similarity = _compute_similarity_score(raw_score, genre_overlap, seed_genre_count, alignment)
+        if similarity < MIN_ALIGNMENT_SCORE:
+            continue
+        ranked.append((similarity, alignment, track_obj, feature_obj, candidate_genres, genre_overlap))
 
-    ranked.sort(key=lambda item: (item[4] > 0, item[0]), reverse=True)
+    ranked.sort(key=lambda item: (item[5] > 0, item[0], item[1]), reverse=True)
 
     final: List[RecommendationItem] = []
     seen_artists: Set[str] = set()
-    for similarity, track_obj, feature_obj, candidate_genres, _ in ranked:
+    for similarity, _, track_obj, feature_obj, candidate_genres, _ in ranked:
         if len(final) >= top_k:
             break
         artist_ids = {artist.id for artist in track_obj.artists}
@@ -652,7 +740,17 @@ async def _backfill_with_spotify(
         candidate_genres = _collect_genres(candidate_track.artists)
         raw_score = _cosine_similarity(seed_vector, candidate_vector)
         genre_overlap = len(seed_genres & candidate_genres)
-        similarity = _compute_similarity_score(raw_score, genre_overlap, seed_genre_count)
+        alignment = _compute_feature_alignment(seed_features, candidate_features)
+        if alignment < MIN_ALIGNMENT_SCORE and genre_overlap == 0:
+            continue
+        similarity = _compute_similarity_score(
+            raw_score,
+            genre_overlap,
+            seed_genre_count,
+            alignment,
+        )
+        if similarity < MIN_ALIGNMENT_SCORE:
+            continue
         shared = seed_genres & candidate_genres
         explanation = _build_explanation(seed_features, candidate_features, shared)
 
@@ -665,15 +763,15 @@ async def _backfill_with_spotify(
             continue
 
         item = _track_to_recommendation(candidate_track, adjusted, explanation)
-        augmented.append((genre_overlap, adjusted, item, artist_ids_set))
+        augmented.append((genre_overlap, alignment, adjusted, item, artist_ids_set))
 
     if not augmented:
         return existing
 
-    augmented.sort(key=lambda entry: (entry[0] > 0, entry[0], entry[1]), reverse=True)
+    augmented.sort(key=lambda entry: (entry[0] > 0, entry[0], entry[1], entry[2]), reverse=True)
 
     final = list(existing)
-    for genre_overlap, adjusted, item, artist_ids_set in augmented:
+    for genre_overlap, _, adjusted, item, artist_ids_set in augmented:
         if len(final) >= limit:
             break
         if item.track_id in exclude_ids:
