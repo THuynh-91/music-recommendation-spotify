@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, Iterable, List
+from typing import Any, AsyncIterator, Dict, Iterable, List, Sequence
 
 import httpx
 
@@ -186,6 +186,23 @@ class SpotifyClient:
 
     async def get_audio_analysis(self, track_id: str) -> Dict[str, Any]:
         return await self._request("GET", f"/audio-analysis/{track_id}")
+
+    async def get_recommendations(
+        self,
+        *,
+        seed_tracks: Sequence[str] | None = None,
+        seed_artists: Sequence[str] | None = None,
+        seed_genres: Sequence[str] | None = None,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"limit": max(1, min(limit, 100))}
+        if seed_tracks:
+            params["seed_tracks"] = ",".join(list(dict.fromkeys([track for track in seed_tracks if track])))
+        if seed_artists:
+            params["seed_artists"] = ",".join(list(dict.fromkeys([artist for artist in seed_artists if artist])))
+        if seed_genres:
+            params["seed_genres"] = ",".join(list(dict.fromkeys([genre for genre in seed_genres if genre])))
+        return await self._request("GET", "/recommendations", params=params)
 
     async def get_playlist(self, playlist_id: str) -> Dict[str, Any]:
         params = {

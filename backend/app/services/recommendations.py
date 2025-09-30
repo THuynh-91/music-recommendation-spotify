@@ -314,6 +314,15 @@ def _build_explanation(
     return highlights[0].capitalize() + "; " + "; ".join(highlights[1:])
 
 
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    if a.size == 0 or b.size == 0:
+        return 0.0
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+
 def _average_audio_features(features_list: Sequence[Dict[str, Any]]) -> Dict[str, float]:
     if not features_list:
         return {}
@@ -475,6 +484,119 @@ async def _hydrate_recommendations(
         explanation = _build_explanation(seed_features, feature_obj.audio_features, seed_genres & candidate_genres)
         final.append(_track_to_recommendation(track_obj, adjusted, explanation))
         seen_artists.update(artist_ids)
+    return final
+
+
+async def _collect_seen_artist_ids(session: AsyncSession, track_ids: Set[str]) -> Set[str]:
+    if not track_ids:
+        return set()
+    result = await session.execute(
+        select(models.Track)
+        .options(selectinload(models.Track.artists))
+        .where(models.Track.id.in_(track_ids))
+    )
+    seen: Set[str] = set()
+    for track in result.scalars():
+        seen.update(artist.id for artist in track.artists if artist.id)
+    return seen
+
+
+async def _backfill_with_spotify(
+    session: AsyncSession,
+    spotify_client: SpotifyClient,
+    index_service: FaissService,
+    settings: Settings,
+    *,
+    seed_track: models.Track,
+    seed_vector: np.ndarray,
+    seed_features: Dict[str, Any],
+    seed_genres: SharedGenres,
+    existing: List[RecommendationItem],
+    limit: int,
+) -> List[RecommendationItem]:
+    needed = limit - len(existing)
+    if needed <= 0:
+        return existing
+
+    existing_ids = {item.track_id for item in existing}
+    exclude_ids = existing_ids | {seed_track.id}
+    seen_artists = await _collect_seen_artist_ids(session, existing_ids)
+
+    artist_ids = [artist.id for artist in seed_track.artists if artist.id]
+    seed_genre_list = sorted(seed_genres)
+    try:
+        rec_payload = await spotify_client.get_recommendations(
+            seed_tracks=[seed_track.id],
+            seed_artists=artist_ids[:2],
+            seed_genres=seed_genre_list[:2],
+            limit=min(max(needed * 2, needed + 2), settings.recommendation_max_limit * 2),
+        )
+    except SpotifyClientError as exc:
+        logger.warning("Spotify fallback recommendations failed for %s: %s", seed_track.id, exc)
+        return existing
+
+    tracks_payload = rec_payload.get("tracks") if isinstance(rec_payload, dict) else None
+    if not tracks_payload:
+        return existing
+
+    seed_genre_count = len(seed_genres)
+    augmented: List[Tuple[int, float, RecommendationItem, Set[str]]] = []
+    for track_payload in tracks_payload:
+        track_id = track_payload.get("id") if isinstance(track_payload, dict) else None
+        if not track_id or track_id in exclude_ids:
+            continue
+        try:
+            candidate_track, candidate_vector, candidate_features, _ = await _ensure_track_vector(
+                session,
+                spotify_client,
+                index_service,
+                settings,
+                track_payload=track_payload,
+            )
+        except SpotifyClientError as exc:
+            logger.debug("Failed to ingest recommended track %s: %s", track_id, exc)
+            continue
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Unexpected error ingesting recommended track %s: %s", track_id, exc)
+            continue
+
+        track_with_relations = await _load_track_with_artists(session, candidate_track.id)
+        if track_with_relations is not None:
+            candidate_track = track_with_relations
+
+        candidate_genres = _collect_genres(candidate_track.artists)
+        raw_score = _cosine_similarity(seed_vector, candidate_vector)
+        genre_overlap = len(seed_genres & candidate_genres)
+        similarity = _compute_similarity_score(raw_score, genre_overlap, seed_genre_count)
+        shared = seed_genres & candidate_genres
+        explanation = _build_explanation(seed_features, candidate_features, shared)
+
+        artist_ids_set = {artist.id for artist in candidate_track.artists if artist.id}
+        penalty = 0.08 if seen_artists & artist_ids_set else 0.0
+        adjusted = max(similarity - penalty, 0.0)
+
+        if seed_genres and genre_overlap == 0 and adjusted < 0.55:
+            # Skip obviously unrelated tracks when we know the seed genres
+            continue
+
+        item = _track_to_recommendation(candidate_track, adjusted, explanation)
+        augmented.append((genre_overlap, adjusted, item, artist_ids_set))
+
+    if not augmented:
+        return existing
+
+    augmented.sort(key=lambda entry: (entry[0] > 0, entry[0], entry[1]), reverse=True)
+
+    final = list(existing)
+    for genre_overlap, adjusted, item, artist_ids_set in augmented:
+        if len(final) >= limit:
+            break
+        if item.track_id in exclude_ids:
+            continue
+        final.append(item)
+        exclude_ids.add(item.track_id)
+        seen_artists.update(artist_ids_set)
+
     return final
 
 
@@ -658,6 +780,19 @@ async def recommend_for_entity(
             seed_genres=seed_genres,
             top_k=limit,
         )
+        if len(recommendations) < limit:
+            recommendations = await _backfill_with_spotify(
+                session,
+                spotify_client,
+                index_service,
+                settings,
+                seed_track=track,
+                seed_vector=vector,
+                seed_features=features,
+                seed_genres=seed_genres,
+                existing=recommendations,
+                limit=limit,
+            )
         response = RecommendResponse(
             type="track",
             seed_track=_track_to_seed(track),
