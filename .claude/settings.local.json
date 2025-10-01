@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(docker compose:*)",
+      "Bash(timeout 15 bash -c 'until docker compose -f \"\"C:\\Users\\altus\\OneDrive\\Documents\\Visual Studio\\Spotify-Rec\\docker-compose.next.yml\"\" ps | grep -q \"\"healthy\"\"; do sleep 2; done')",
+      "Bash(timeout 30 bash -c 'until docker compose -f \"\"C:\\Users\\altus\\OneDrive\\Documents\\Visual Studio\\Spotify-Rec\\docker-compose.next.yml\"\" ps | grep -q \"\"healthy\"\"; do sleep 2; done')",
+      "Bash(curl -s http://127.0.0.1:4000)",
+      "Bash(del \"C:\\Users\\altus\\OneDrive\\Documents\\Visual Studio\\Spotify-Rec\\test_recommendation_logic.py\")",
+      "WebFetch(domain:developer.spotify.com)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

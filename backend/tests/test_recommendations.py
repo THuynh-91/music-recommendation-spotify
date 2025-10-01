@@ -22,7 +22,7 @@ from app.core.config import Settings
 from app.db import models
 from app.db.base import Base
 from app.services.recommendations import (
-    _backfill_with_spotify,
+    _get_spotify_recommendations,
     _ensure_track_vector,
     _load_track_with_artists,
 )
@@ -56,6 +56,8 @@ class _StubSpotifyClient:
     artists: Dict[str, Dict[str, Any]]
     recommendations: List[Dict[str, Any]]
     related: Dict[str, List[Dict[str, Any]]] | None = None
+    top_tracks: Dict[str, List[Dict[str, Any]]] | None = None
+    search_results: Dict[str, List[Dict[str, Any]]] | None = None
     last_request: Dict[str, Any] | None = None
 
     async def get_track(self, track_id: str) -> Dict[str, Any]:
@@ -76,6 +78,16 @@ class _StubSpotifyClient:
             related = list(self.related[artist_id])
         return {"artists": related}
 
+    async def get_artist_top_tracks(self, artist_id: str, market: str = "US") -> Dict[str, Any]:  # pragma: no cover - stub behavior
+        tracks = []
+        if self.top_tracks and artist_id in self.top_tracks:
+            tracks = list(self.top_tracks[artist_id])
+        return {"tracks": tracks}
+
+    async def search_tracks(self, query: str, *, limit: int = 10) -> Dict[str, Any]:  # pragma: no cover - stub behavior
+        items = list((self.search_results or {}).get(query, []))[:limit]
+        return {"tracks": {"items": items}}
+
     async def get_recommendations(
         self,
         *,
@@ -92,7 +104,7 @@ class _StubSpotifyClient:
             "limit": limit,
             "tunable_params": dict(tunable_params or {}),
         }
-        return {"tracks": list(self.recommendations)}
+        return {"tracks": list(self.recommendations)[:limit]}
 
 
 async def _run_backfill_flow(tmp_path: Path) -> None:
@@ -236,7 +248,7 @@ async def _run_backfill_flow(tmp_path: Path) -> None:
         )
         index_service = _StubIndexService()
 
-        seed_track, seed_vector, seed_features, _ = await _ensure_track_vector(
+        seed_track, _seed_vector, seed_features, _ = await _ensure_track_vector(
             session,
             stub_client,
             index_service,
@@ -247,18 +259,16 @@ async def _run_backfill_flow(tmp_path: Path) -> None:
         seed_track_loaded = await _load_track_with_artists(session, seed_track.id)
         assert seed_track_loaded is not None
 
-        recommendations = await _backfill_with_spotify(
+        recommendations = await _get_spotify_recommendations(
             session,
             stub_client,
-            index_service,
-            settings,
             seed_track=seed_track_loaded,
-            seed_vector=seed_vector,
             seed_features=seed_features,
             seed_genres={"viet r&b"},
             seed_genre_priority=["viet r&b"],
-            existing=[],
             limit=3,
+            settings=settings,
+            index_service=index_service,
             extra_seed_artists=[rec_artist_id],
         )
 
@@ -276,6 +286,7 @@ async def _run_backfill_flow(tmp_path: Path) -> None:
 def test_spotify_backfill_ingests_unseen_tracks(tmp_path: Path) -> None:
     stub_client = asyncio.run(_run_backfill_flow(tmp_path))
     assert stub_client.last_request is not None
+    assert stub_client.last_request["limit"] == 9
     params = stub_client.last_request["tunable_params"]
     seed_artists = stub_client.last_request["seed_artists"]
     assert seed_artists[0] == "seed-artist"

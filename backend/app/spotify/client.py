@@ -114,9 +114,19 @@ class SpotifyClient:
 
         logger = logging.getLogger("spotify.client")
 
+        # Strip leading slash to avoid double slashes with base_url
+        clean_url = url.lstrip("/")
+
         for attempt in range(1, self.retries + 1):
             try:
-                response = await client.request(method, url, params=params, json=json)
+                if "recommendations" in clean_url:
+                    logger.info(f"Recommendations API full URL: {client.base_url}/{clean_url}")
+                    logger.info(f"Recommendations API params: {params}")
+                response = await client.request(method, clean_url, params=params, json=json)
+                if url == "/recommendations":
+                    logger.info(f"Recommendations API response status: {response.status_code}")
+                    logger.info(f"Recommendations API full request URL: {response.request.url}")
+                    logger.info(f"Recommendations API response body: {response.text[:500]}")
             except httpx.RequestError as exc:  # network issue
                 if attempt == self.retries:
                     raise SpotifyClientError(f"network error: {exc}") from exc
@@ -131,7 +141,8 @@ class SpotifyClient:
                 await asyncio.sleep(retry_after)
                 continue
 
-            if response.status_code == 403 and method == "GET" and any(
+            # Don't use client credentials fallback for recommendations - it requires user token
+            if response.status_code == 403 and method == "GET" and url != "/recommendations" and any(
                 url.startswith(path) for path in ("/audio-features", "/audio-analysis")
             ):
                 try:
@@ -177,6 +188,11 @@ class SpotifyClient:
             return {"artists": []}
         return await self._request("GET", f"/artists/{artist_id}/related-artists")
 
+    async def get_artist_top_tracks(self, artist_id: str, market: str = "US") -> Dict[str, Any]:
+        if not artist_id:
+            return {"tracks": []}
+        return await self._request("GET", f"/artists/{artist_id}/top-tracks", params={"market": market})
+
     async def get_audio_features(self, track_id: str) -> Dict[str, Any]:
         return await self._request("GET", f"/audio-features/{track_id}")
 
@@ -201,16 +217,54 @@ class SpotifyClient:
         limit: int = 20,
         tunable_params: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
+        logger = logging.getLogger("spotify.client")
+
         params: Dict[str, Any] = {"limit": max(1, min(limit, 100))}
-        if seed_tracks:
-            params["seed_tracks"] = ",".join(list(dict.fromkeys([track for track in seed_tracks if track])))
-        if seed_artists:
-            params["seed_artists"] = ",".join(list(dict.fromkeys([artist for artist in seed_artists if artist])))
-        if seed_genres:
-            params["seed_genres"] = ",".join(list(dict.fromkeys([genre for genre in seed_genres if genre])))
+
+        # Clean and validate seeds
+        clean_tracks = list(dict.fromkeys([track for track in (seed_tracks or []) if track]))[:5]
+        clean_artists = list(dict.fromkeys([artist for artist in (seed_artists or []) if artist]))[:5]
+        clean_genres = list(dict.fromkeys([genre for genre in (seed_genres or []) if genre]))[:5]
+
+        # Must have at least one seed
+        total_seeds = len(clean_tracks) + len(clean_artists) + len(clean_genres)
+        if total_seeds == 0:
+            raise SpotifyClientError("at least one seed required for recommendations")
+
+        # Maximum 5 seeds total for Spotify API
+        if total_seeds > 5:
+            # Prioritize tracks, then artists, then genres
+            remaining = 5
+            final_tracks = clean_tracks[:min(len(clean_tracks), remaining)]
+            remaining -= len(final_tracks)
+            final_artists = clean_artists[:min(len(clean_artists), remaining)]
+            remaining -= len(final_artists)
+            final_genres = clean_genres[:min(len(clean_genres), remaining)]
+
+            clean_tracks = final_tracks
+            clean_artists = final_artists
+            clean_genres = final_genres
+
+        if clean_tracks:
+            params["seed_tracks"] = ",".join(clean_tracks)
+        if clean_artists:
+            params["seed_artists"] = ",".join(clean_artists)
+        if clean_genres:
+            params["seed_genres"] = ",".join(clean_genres)
+
         if tunable_params:
             params.update({key: value for key, value in tunable_params.items() if value is not None})
-        return await self._request("GET", "/recommendations", params=params)
+
+        logger.info(f"Recommendations request: tracks={clean_tracks}, artists={clean_artists}, genres={clean_genres}, limit={limit}")
+        logger.debug(f"Full params: {params}")
+
+        try:
+            result = await self._request("GET", "/recommendations", params=params)
+            logger.info(f"Recommendations returned {len(result.get('tracks', []))} tracks")
+            return result
+        except SpotifyClientError as exc:
+            logger.error(f"Recommendations failed with params: {params}, error: {exc}")
+            raise
 
     async def get_playlist(self, playlist_id: str) -> Dict[str, Any]:
         params = {

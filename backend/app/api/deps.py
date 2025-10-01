@@ -32,7 +32,12 @@ async def get_spotify_client(
     request: Request,
     settings: Settings = Depends(get_settings_dep),
 ) -> AsyncIterator[SpotifyClient]:
+    import logging
+    logger = logging.getLogger("spotify.client")
+
     token = extract_spotify_access_token(request)
+    logger.info(f"Using Spotify access token (first 20 chars): {token[:20]}...")
+
     client = SpotifyClient(access_token=token, timeout=settings.http_timeout_seconds, retries=settings.http_retries, settings=settings)
     try:
         yield client
