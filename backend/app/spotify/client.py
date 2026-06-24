@@ -269,6 +269,7 @@ class SpotifyClient:
     async def get_playlist(self, playlist_id: str) -> Dict[str, Any]:
         params = {
             "fields": "id,name,description,images,owner(id,display_name),snapshot_id,tracks.total",
+            "market": "US",  # Required for editorial playlists to be accessible
         }
         return await self._request("GET", f"/playlists/{playlist_id}", params=params)
 
@@ -276,6 +277,7 @@ class SpotifyClient:
         url = f"/playlists/{playlist_id}/tracks"
         params: Dict[str, Any] = {
             "limit": batch_size,
+            "market": "US",  # Required for editorial playlists to be accessible
             "fields": "items(added_at,track(id,name,uri,duration_ms,explicit,preview_url,popularity,external_urls,href,album(id,name,images,release_date,release_date_precision),artists(id,name,genres,images,popularity))),next",
         }
         while True:

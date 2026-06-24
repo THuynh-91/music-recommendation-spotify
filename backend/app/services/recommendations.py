@@ -514,24 +514,32 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _average_audio_features(features_list: Sequence[Dict[str, Any]]) -> Dict[str, float]:
+    """Compute median audio features for better robustness to outliers."""
     if not features_list:
         return {}
-    totals: Dict[str, float] = {key: 0.0 for key in AUDIO_FEATURE_KEYS}
-    counts: Dict[str, int] = {key: 0 for key in AUDIO_FEATURE_KEYS}
+
+    # Collect values for each feature
+    feature_values: Dict[str, List[float]] = {key: [] for key in AUDIO_FEATURE_KEYS}
     for features in features_list:
         for key in AUDIO_FEATURE_KEYS:
             value = features.get(key)
             if value is None:
                 continue
             if isinstance(value, (int, float)):
-                totals[key] += float(value)
-                counts[key] += 1
-    averages = {
-        key: totals[key] / counts[key]
-        for key in AUDIO_FEATURE_KEYS
-        if counts[key]
-    }
-    return averages
+                feature_values[key].append(float(value))
+
+    # Compute median for each feature (more robust than mean)
+    medians: Dict[str, float] = {}
+    for key, values in feature_values.items():
+        if values:
+            sorted_values = sorted(values)
+            n = len(sorted_values)
+            if n % 2 == 0:
+                medians[key] = (sorted_values[n // 2 - 1] + sorted_values[n // 2]) / 2
+            else:
+                medians[key] = sorted_values[n // 2]
+
+    return medians
 
 
 async def _ensure_track_vector(
@@ -1226,20 +1234,32 @@ async def _process_playlist(
         seed_genres = set(genre for genre, _ in seed_genres_counter.most_common(20))
         seed_genre_priority = [genre for genre, _ in seed_genres_counter.most_common(5)]
 
-        logger.info(f"Playlist analysis: {len(track_ids)} tracks, top genres: {seed_genre_priority[:3]}")
-        logger.info(f"Playlist vibe: tempo={seed_features_avg.get('tempo', 0):.1f}, energy={seed_features_avg.get('energy', 0):.2f}, danceability={seed_features_avg.get('danceability', 0):.2f}")
+        # Get top artists for logging
+        top_artists = artist_counter.most_common(5)
+        top_artist_names = []
+        for artist_id, count in top_artists:
+            artist_obj = await session.get(models.Artist, artist_id)
+            if artist_obj:
+                top_artist_names.append(f"{artist_obj.name} ({count})")
+
+        logger.info(f"Playlist analysis: {len(track_ids)} tracks")
+        logger.info(f"Top genres: {', '.join(seed_genre_priority[:5])}")
+        logger.info(f"Top artists: {', '.join(top_artist_names)}")
+        logger.info(f"Playlist median vibe: tempo={seed_features_avg.get('tempo', 0):.1f} BPM, "
+                   f"energy={seed_features_avg.get('energy', 0):.2f}, "
+                   f"danceability={seed_features_avg.get('danceability', 0):.2f}, "
+                   f"valence={seed_features_avg.get('valence', 0):.2f}")
 
         recommendations: List[RecommendationItem] = []
 
         if primary_track is not None:
-            # Use average features from entire playlist for better vibe matching
+            # Use median features from entire playlist for better vibe matching
             seed_features_payload = seed_features_avg or dict(primary_features or {})
 
-            # Don't use specific tracks as seeds - we want fresh recommendations based on vibe
-            # Get artists from the most common ones in the playlist
+            # Get dominant artists from the playlist (top 10 by frequency)
             dominant_artist_ids = [artist_id for artist_id, _ in artist_counter.most_common(10) if artist_id]
 
-            logger.info(f"Using {len(dominant_artist_ids)} dominant artists from playlist")
+            logger.info(f"Using {len(dominant_artist_ids)} dominant artists for seeding recommendations")
 
             # Use our custom recommendation function with playlist vibe
             recommendations = await _get_spotify_recommendations(

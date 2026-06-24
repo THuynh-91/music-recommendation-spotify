@@ -7,7 +7,9 @@
       "Bash(timeout 30 bash -c 'until docker compose -f \"\"C:\\Users\\altus\\OneDrive\\Documents\\Visual Studio\\Spotify-Rec\\docker-compose.next.yml\"\" ps | grep -q \"\"healthy\"\"; do sleep 2; done')",
       "Bash(curl -s http://127.0.0.1:4000)",
       "Bash(del \"C:\\Users\\altus\\OneDrive\\Documents\\Visual Studio\\Spotify-Rec\\test_recommendation_logic.py\")",
-      "WebFetch(domain:developer.spotify.com)"
+      "WebFetch(domain:developer.spotify.com)",
+      "Bash(docker exec:*)",
+      "Bash(powershell -Command \"docker exec 9a76e8c843fc cat /app/app/spotify/client.py\")"
     ],
     "deny": [],
     "ask": []
