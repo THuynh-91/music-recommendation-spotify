@@ -100,6 +100,10 @@ export function HomeClient({ signedIn, noAuthMode = false }: { signedIn: boolean
 
   const [inputUrl, setInputUrl] = useState("");
   const [limit, setLimit] = useState(15);
+  // Raw text backing the count <input> so the user can freely clear and retype.
+  // We clamp to a valid number only on blur; `limit` stays the numeric source of
+  // truth used for the actual request.
+  const [limitText, setLimitText] = useState("15");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<RecommendationResponse | null>(null);
@@ -243,13 +247,25 @@ export function HomeClient({ signedIn, noAuthMode = false }: { signedIn: boolean
             type="number"
             min={1}
             max={50}
-            value={limit}
+            value={limitText}
             onChange={(event) => {
-              const parsed = Number(event.target.value);
-              if (!Number.isNaN(parsed)) {
-                const clamped = Math.min(Math.max(Math.trunc(parsed), 1), 50);
-                setLimit(clamped);
+              const raw = event.target.value;
+              // Let the field be freely edited (including temporarily empty).
+              setLimitText(raw);
+              const parsed = Number(raw);
+              if (raw !== "" && Number.isFinite(parsed)) {
+                setLimit(Math.min(Math.max(Math.trunc(parsed), 1), 50));
               }
+            }}
+            onBlur={() => {
+              // Normalise the visible value once editing finishes.
+              const parsed = Number(limitText);
+              const clamped =
+                limitText === "" || !Number.isFinite(parsed)
+                  ? limit
+                  : Math.min(Math.max(Math.trunc(parsed), 1), 50);
+              setLimit(clamped);
+              setLimitText(String(clamped));
             }}
             disabled={loading}
           />
