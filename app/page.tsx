@@ -6,16 +6,18 @@ export const dynamic = "force-dynamic";
 
 export default function Page() {
   const cookieStore = cookies();
-  // Demo mode: no Spotify app configured. Let the user exercise the UI with
-  // mock data instead of showing a dead "connect Spotify" wall.
-  const demoMode = process.env.DEMO_MODE === "1" || !process.env.SPOTIFY_CLIENT_ID;
-  const signedIn =
-    demoMode ||
-    Boolean(cookieStore.get("sp_access_token") || cookieStore.get("sp_refresh_token"));
+  // The recommender needs NO Spotify login: it resolves tracks via Spotify's
+  // public oEmbed and pulls real similar songs from Deezer's public API. So the
+  // dashboard is always available. We surface a "no-auth (Deezer)" banner unless
+  // the user happens to have a live Spotify session.
+  const hasSpotifySession = Boolean(
+    cookieStore.get("sp_access_token") || cookieStore.get("sp_refresh_token"),
+  );
+  const noAuthMode = !hasSpotifySession;
 
   return (
     <main className="page">
-      <HomeClient signedIn={signedIn} demoMode={demoMode} />
+      <HomeClient signedIn noAuthMode={noAuthMode} />
     </main>
   );
 }

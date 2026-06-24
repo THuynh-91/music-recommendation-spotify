@@ -93,7 +93,7 @@ function ResultsSkeleton({ count }: { count: number }) {
   );
 }
 
-export function HomeClient({ signedIn, demoMode = false }: { signedIn: boolean; demoMode?: boolean }) {
+export function HomeClient({ signedIn, noAuthMode = false }: { signedIn: boolean; noAuthMode?: boolean }) {
   const [profile, setProfile] = useState<SpotifyProfile | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -175,14 +175,15 @@ export function HomeClient({ signedIn, demoMode = false }: { signedIn: boolean; 
           <span className="hero-eyebrow">Spotify Recommendation Studio</span>
           <h1>Find your next favourite track</h1>
           <p>
-            Connect Spotify and drop any track or playlist link. We analyse audio features and
-            similarity to surface recommendations, each with a human-readable reason why.
+            Drop any Spotify track link and get real similar songs - no login required. We resolve
+            the track via Spotify&apos;s public oEmbed and pull related tracks from Deezer&apos;s
+            public API.
           </p>
           <button className="cta cta-spotify" onClick={handleSignIn}>
             <SpotifyGlyph />
             Connect Spotify
           </button>
-          <p className="hero-foot subtle">No Spotify app configured? Launch with demo data to explore the UI.</p>
+          <p className="hero-foot subtle">No login needed - recommendations come from Deezer&apos;s public catalogue.</p>
         </div>
       </section>
     );
@@ -190,12 +191,13 @@ export function HomeClient({ signedIn, demoMode = false }: { signedIn: boolean; 
 
   return (
     <div className="dashboard">
-      {demoMode && (
+      {noAuthMode && (
         <div className="demo-banner" role="status">
-          <span className="demo-pill">Demo</span>
+          <span className="demo-pill">Live</span>
           <span className="demo-text">
-            You are exploring with sample data; Spotify is not connected. Add your Spotify
-            credentials to <code>.env</code> to enable the live flow.
+            Real recommendations, no Spotify login required. Tracks are resolved via Spotify&apos;s
+            public oEmbed and similar songs come from <strong>Deezer&apos;s public API</strong>
+            (related artists). These are real songs, not samples.
           </span>
         </div>
       )}
@@ -213,7 +215,7 @@ export function HomeClient({ signedIn, demoMode = false }: { signedIn: boolean; 
             ) : profileError ? (
               <span className="profile-error">{profileError}</span>
             ) : (
-              <span className="profile-subtle">{demoMode ? "Demo session" : "Connected"}</span>
+              <span className="profile-subtle">{noAuthMode ? "No-auth mode (Deezer)" : "Connected"}</span>
             )}
           </div>
         </div>
@@ -252,7 +254,7 @@ export function HomeClient({ signedIn, demoMode = false }: { signedIn: boolean; 
             disabled={loading}
           />
           <button className="cta" type="submit" disabled={loading}>
-            {loading ? "Crunching audio features..." : "Get recommendations"}
+            {loading ? "Finding similar songs..." : "Get recommendations"}
           </button>
         </form>
         <div className="examples">
@@ -261,17 +263,17 @@ export function HomeClient({ signedIn, demoMode = false }: { signedIn: boolean; 
             type="button"
             className="chip"
             disabled={loading}
-            onClick={() => runExample("https://open.spotify.com/track/demo-seed")}
+            onClick={() => runExample("https://open.spotify.com/track/32lItqlMi4LBhb4k0BaSaC")}
           >
-            Sample track
+            Candy Paint - Post Malone
           </button>
           <button
             type="button"
             className="chip"
             disabled={loading}
-            onClick={() => runExample("https://open.spotify.com/playlist/demo-seed")}
+            onClick={() => runExample("https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b")}
           >
-            Sample playlist
+            Blinding Lights - The Weeknd
           </button>
         </div>
         {error && (
@@ -331,8 +333,8 @@ export function HomeClient({ signedIn, demoMode = false }: { signedIn: boolean; 
           )}
 
           <p className="results-count subtle">
-            {result.recommendations.length} recommendation
-            {result.recommendations.length === 1 ? "" : "s"}, ranked by similarity
+            {result.recommendations.length} real recommendation
+            {result.recommendations.length === 1 ? "" : "s"} via Deezer related artists
           </p>
           <div className="grid">
             {result.recommendations.map((item, idx) => (
@@ -360,7 +362,7 @@ export function HomeClient({ signedIn, demoMode = false }: { signedIn: boolean; 
 }
 
 function RecommendationCard({ item, rank }: { item: RecommendationItem; rank: number }) {
-  const match = Math.round(item.similarity * 100);
+  const isSpotify = item.external_url?.includes("open.spotify.com");
   return (
     <article className="card">
       <div className="card-cover-wrap">
@@ -372,12 +374,6 @@ function RecommendationCard({ item, rank }: { item: RecommendationItem; rank: nu
           <h4 title={item.name}>{item.name}</h4>
           <p className="subtle">{formatArtists(item.artists)}</p>
         </div>
-        <div className="match" aria-label={`Match ${match} percent`}>
-          <div className="match-bar">
-            <span className="match-fill" style={{ width: `${match}%` }} />
-          </div>
-          <span className="badge">{match}% match</span>
-        </div>
         <p className="explanation">{item.explanation}</p>
         <footer>
           {item.external_url && (
@@ -388,7 +384,7 @@ function RecommendationCard({ item, rank }: { item: RecommendationItem; rank: nu
               className="ghost ghost-spotify"
             >
               <SpotifyGlyph />
-              Open in Spotify
+              {isSpotify ? "Open in Spotify" : "Open on Deezer"}
             </a>
           )}
         </footer>
