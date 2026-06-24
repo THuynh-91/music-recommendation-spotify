@@ -1306,46 +1306,6 @@ async def _process_playlist(
             await redis.delete(lock_key)
 
 
-def build_demo_response(entity: SpotifyEntity, limit: int) -> RecommendResponse:
-    """Deterministic mock recommendations for demo mode (no Spotify/DB/Redis)."""
-    demo_tracks = [
-        ("Midnight City", ["M83"], "High energy; matching tempo around 105 BPM"),
-        ("Instant Crush", ["Daft Punk", "Julian Casablancas"], "Similar danceability; shares electronic vibes"),
-        ("Electric Feel", ["MGMT"], "Similar mood; high energy"),
-        ("Tighten Up", ["The Black Keys"], "Matching tempo; shares rock vibes"),
-        ("Dog Days Are Over", ["Florence + The Machine"], "High valence; similar energy"),
-        ("Take Me Out", ["Franz Ferdinand"], "Matching tempo; high danceability"),
-        ("Feel It Still", ["Portugal. The Man"], "Similar mood; shares indie vibes"),
-        ("Pumped Up Kicks", ["Foster The People"], "Similar danceability; matching tempo"),
-    ]
-    count = max(1, min(limit, len(demo_tracks)))
-    recs = [
-        RecommendationItem(
-            track_id=f"demo-{idx}",
-            name=name,
-            artists=artists,
-            preview_url=None,
-            external_url="https://open.spotify.com/",
-            image_url=None,
-            similarity=max(0.6, 0.95 - idx * 0.04),
-            explanation=f"{explanation} (demo data)",
-        )
-        for idx, (name, artists, explanation) in enumerate(demo_tracks[:count])
-    ]
-    if entity.kind == "playlist":
-        return RecommendResponse(
-            type="playlist",
-            seed_playlist=SeedPlaylist(id=entity.id, name="Demo Playlist", track_count=25),
-            playlist=PlaylistIngestSummary(id=entity.id, name="Demo Playlist", track_count=25, ingested_tracks=25),
-            recommendations=recs,
-        )
-    return RecommendResponse(
-        type="track",
-        seed_track=SeedTrack(id=entity.id, name="Demo Seed Track", artists=["Demo Artist"]),
-        recommendations=recs,
-    )
-
-
 async def recommend_for_entity(
     entity: SpotifyEntity,
     *,

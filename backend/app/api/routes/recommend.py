@@ -8,7 +8,12 @@ from ...core.config import Settings
 from ...core.security import verify_service_token
 from ...schemas.recommend import RecommendRequest, RecommendResponse
 from ...services.index import FaissService
-from ...services.recommendations import build_demo_response, recommend_for_entity
+from ...services.realtime_recommender import (
+    RecommenderError,
+    build_real_recommendations,
+    canonical_track_url,
+)
+from ...services.recommendations import recommend_for_entity
 from ...spotify.client import SpotifyAuthError, SpotifyClientError
 from ...spotify.parsing import parse_spotify_url
 from ..deps import (
@@ -36,9 +41,20 @@ async def create_recommendations(
     limit = payload.limit or settings.recommendation_top_k
     limit = max(1, min(limit, settings.recommendation_max_limit))
 
-    # DEMO MODE: serve deterministic mock data without Postgres/Redis/Spotify.
+    # DEMO MODE: no Postgres/Redis/Spotify credentials are available, but we still
+    # return REAL songs via the public Spotify oEmbed -> Deezer pipeline. Playlists
+    # are not supported by that public pipeline; reject them clearly rather than
+    # returning fabricated data.
     if settings.demo_mode:
-        return build_demo_response(entity, limit)
+        if entity.kind != "track":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Demo mode only supports track URLs (real Deezer recommendations).",
+            )
+        try:
+            return await build_real_recommendations(canonical_track_url(entity), limit)
+        except RecommenderError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     market = payload.market or settings.default_market
     try:
