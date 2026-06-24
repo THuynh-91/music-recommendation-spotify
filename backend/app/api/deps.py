@@ -18,12 +18,19 @@ async def get_settings_dep() -> Settings:
     return get_settings()
 
 
-async def get_db_session() -> AsyncIterator[AsyncSession]:
+async def get_db_session() -> AsyncIterator[AsyncSession | None]:
+    # In demo mode we never touch Postgres.
+    if get_settings().demo_mode:
+        yield None
+        return
     async for session in get_session():
         yield session
 
 
-async def get_redis_dep() -> AsyncIterator[Redis]:
+async def get_redis_dep() -> AsyncIterator[Redis | None]:
+    if get_settings().demo_mode:
+        yield None
+        return
     async for client in get_redis():
         yield client
 
@@ -31,7 +38,11 @@ async def get_redis_dep() -> AsyncIterator[Redis]:
 async def get_spotify_client(
     request: Request,
     settings: Settings = Depends(get_settings_dep),
-) -> AsyncIterator[SpotifyClient]:
+) -> AsyncIterator[SpotifyClient | None]:
+    if settings.demo_mode:
+        yield None
+        return
+
     import logging
     logger = logging.getLogger("spotify.client")
 
@@ -45,5 +56,7 @@ async def get_spotify_client(
         await client.close()
 
 
-async def get_index_service() -> FaissService:
+async def get_index_service() -> FaissService | None:
+    if get_settings().demo_mode:
+        return None
     return await get_faiss_service()

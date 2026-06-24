@@ -6,8 +6,13 @@ import {
   refreshSpotifyTokens,
 } from "@/lib/server-auth";
 import type { SpotifyTokenResponse } from "@/lib/server-auth";
+import { DEMO_PROFILE } from "@/lib/demo";
 
 const PROFILE_ENDPOINT = "https://api.spotify.com/v1/me";
+
+function isDemoMode() {
+  return process.env.DEMO_MODE === "1" || !process.env.SPOTIFY_CLIENT_ID;
+}
 
 async function fetchProfile(token: string) {
   return fetch(PROFILE_ENDPOINT, {
@@ -20,6 +25,9 @@ async function fetchProfile(token: string) {
 
 export async function GET() {
   try {
+    if (isDemoMode()) {
+      return NextResponse.json(DEMO_PROFILE);
+    }
     const { accessToken, tokens } = await ensureAccessToken();
     if (!accessToken) {
       return NextResponse.json({ error: "not_authenticated" }, { status: 401 });

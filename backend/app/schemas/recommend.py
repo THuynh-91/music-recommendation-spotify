@@ -15,6 +15,12 @@ class RecommendRequest(BaseModel):
         le=50,
         description="Desired number of recommendations to return",
     )
+    market: str | None = Field(
+        None,
+        min_length=2,
+        max_length=2,
+        description="ISO 3166-1 alpha-2 market derived from the user's country",
+    )
 
     @field_validator("url")
     @classmethod

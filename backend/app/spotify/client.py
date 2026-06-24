@@ -266,18 +266,18 @@ class SpotifyClient:
             logger.error(f"Recommendations failed with params: {params}, error: {exc}")
             raise
 
-    async def get_playlist(self, playlist_id: str) -> Dict[str, Any]:
+    async def get_playlist(self, playlist_id: str, market: str = "US") -> Dict[str, Any]:
         params = {
             "fields": "id,name,description,images,owner(id,display_name),snapshot_id,tracks.total",
-            "market": "US",  # Required for editorial playlists to be accessible
+            "market": market,  # Required for editorial playlists to be accessible
         }
         return await self._request("GET", f"/playlists/{playlist_id}", params=params)
 
-    async def iter_playlist_tracks(self, playlist_id: str, batch_size: int = 100) -> AsyncIterator[Dict[str, Any]]:
+    async def iter_playlist_tracks(self, playlist_id: str, batch_size: int = 100, market: str = "US") -> AsyncIterator[Dict[str, Any]]:
         url = f"/playlists/{playlist_id}/tracks"
         params: Dict[str, Any] = {
             "limit": batch_size,
-            "market": "US",  # Required for editorial playlists to be accessible
+            "market": market,  # Required for editorial playlists to be accessible
             "fields": "items(added_at,track(id,name,uri,duration_ms,explicit,preview_url,popularity,external_urls,href,album(id,name,images,release_date,release_date_precision),artists(id,name,genres,images,popularity))),next",
         }
         while True:

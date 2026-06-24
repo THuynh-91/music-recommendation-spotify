@@ -7,7 +7,6 @@ import logging
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
-import faiss
 import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,10 +17,18 @@ from ..db import models
 
 logger = logging.getLogger("faiss")
 
+
+def _faiss():
+    """Lazily import faiss so the app can boot (e.g. demo mode) without it."""
+    import faiss  # noqa: PLC0415
+
+    return faiss
+
+
 class FaissService:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
-        self.index: faiss.IndexIDMap | None = None
+        self.index = None  # faiss.IndexIDMap | None
         self.id_to_track: Dict[int, str] = {}
         self.track_to_id: Dict[str, int] = {}
         self.dim: int | None = None
@@ -36,9 +43,9 @@ class FaissService:
 
     def _ensure_index(self, dim: int) -> None:
         if self.index is None:
+            faiss = _faiss()
             quantizer = faiss.IndexFlatIP(dim)
             index = faiss.IndexIDMap(quantizer)
-            faiss.normalize_L2  # ensure symbol exists
             self.index = index
             self.dim = dim
         elif self.dim != dim:
@@ -51,7 +58,7 @@ class FaissService:
             index_path = Path(self.settings.faiss_index_path)
             meta_path = Path(self.settings.faiss_meta_path)
             if index_path.exists() and meta_path.exists():
-                self.index = faiss.read_index(str(index_path))  # type: ignore[arg-type]
+                self.index = _faiss().read_index(str(index_path))  # type: ignore[arg-type]
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 self.id_to_track = {int(k): v for k, v in meta.get("id_to_track", {}).items()}
                 self.track_to_id = {v: int(k) for k, v in self.id_to_track.items()}
@@ -134,7 +141,7 @@ class FaissService:
             if self.index is None or self.index.ntotal == 0:
                 return []
             matrix = vector.reshape(1, -1).astype(np.float32)
-            faiss.normalize_L2(matrix)
+            _faiss().normalize_L2(matrix)
             scores, ids = self.index.search(matrix, top_k)
         matches: List[Tuple[str, float]] = []
         for idx, score in zip(ids[0], scores[0]):
@@ -153,7 +160,7 @@ class FaissService:
         try:
             index_path.parent.mkdir(parents=True, exist_ok=True)
             meta_path.parent.mkdir(parents=True, exist_ok=True)
-            faiss.write_index(self.index, str(index_path))  # type: ignore[arg-type]
+            _faiss().write_index(self.index, str(index_path))  # type: ignore[arg-type]
             meta = {
                 "id_to_track": {str(k): v for k, v in self.id_to_track.items()},
                 "dim": self.dim,

@@ -751,6 +751,7 @@ async def _get_spotify_recommendations(
     additional_exclude: Optional[Set[str]] = None,
     extra_seed_tracks: Sequence[str] | None = None,
     extra_seed_artists: Sequence[str] | None = None,
+    market: str = "US",
 ) -> List[RecommendationItem]:
     """Generate Spotify-powered recommendations and filter to close sonic matches."""
     if limit <= 0:
@@ -815,7 +816,7 @@ async def _get_spotify_recommendations(
     # Fetch top tracks from seed artists (limited to avoid dominating results)
     for artist_id in artist_seeds[:3]:
         try:
-            top_tracks = await spotify_client.get_artist_top_tracks(artist_id, market="US")
+            top_tracks = await spotify_client.get_artist_top_tracks(artist_id, market=market)
         except SpotifyClientError as exc:
             logger.debug("Top tracks fetch failed for %s: %s", artist_id, exc)
             continue
@@ -843,7 +844,7 @@ async def _get_spotify_recommendations(
             if not related_artist_id:
                 continue
             try:
-                top_tracks = await spotify_client.get_artist_top_tracks(related_artist_id, market="US")
+                top_tracks = await spotify_client.get_artist_top_tracks(related_artist_id, market=market)
             except SpotifyClientError:
                 continue
             for item in (top_tracks.get("tracks") or [])[:5]:  # Increased from 3 to 5
@@ -1129,11 +1130,12 @@ async def _process_playlist(
     index_service: FaissService,
     settings: Settings,
     top_k: int,
+    market: str = "US",
 ) -> RecommendResponse:
     lock_key = f"playlist:{playlist_id}:ingest"
     lock_acquired = await redis.set(lock_key, "1", nx=True, ex=600)
     try:
-        playlist_meta = await spotify_client.get_playlist(playlist_id)
+        playlist_meta = await spotify_client.get_playlist(playlist_id, market=market)
         playlist = await session.get(models.Playlist, playlist_id)
         if playlist is None:
             playlist = models.Playlist(id=playlist_id, name=playlist_meta.get("name") or "Playlist")
@@ -1149,7 +1151,7 @@ async def _process_playlist(
 
         items: List[Tuple[int, Dict[str, Any]]] = []
         position = 0
-        async for entry in spotify_client.iter_playlist_tracks(playlist_id, batch_size=settings.playlist_ingest_batch_size):
+        async for entry in spotify_client.iter_playlist_tracks(playlist_id, batch_size=settings.playlist_ingest_batch_size, market=market):
             track_payload = entry.get("track") if entry else None
             if not track_payload or not track_payload.get("id"):
                 continue
@@ -1275,6 +1277,7 @@ async def _process_playlist(
                 additional_exclude=set(track_ids),  # Exclude all tracks already in playlist
                 extra_seed_tracks=None,  # Don't seed specific tracks
                 extra_seed_artists=dominant_artist_ids,  # Use dominant artists
+                market=market,
             )
 
         summary = PlaylistIngestSummary(
@@ -1303,6 +1306,46 @@ async def _process_playlist(
             await redis.delete(lock_key)
 
 
+def build_demo_response(entity: SpotifyEntity, limit: int) -> RecommendResponse:
+    """Deterministic mock recommendations for demo mode (no Spotify/DB/Redis)."""
+    demo_tracks = [
+        ("Midnight City", ["M83"], "High energy; matching tempo around 105 BPM"),
+        ("Instant Crush", ["Daft Punk", "Julian Casablancas"], "Similar danceability; shares electronic vibes"),
+        ("Electric Feel", ["MGMT"], "Similar mood; high energy"),
+        ("Tighten Up", ["The Black Keys"], "Matching tempo; shares rock vibes"),
+        ("Dog Days Are Over", ["Florence + The Machine"], "High valence; similar energy"),
+        ("Take Me Out", ["Franz Ferdinand"], "Matching tempo; high danceability"),
+        ("Feel It Still", ["Portugal. The Man"], "Similar mood; shares indie vibes"),
+        ("Pumped Up Kicks", ["Foster The People"], "Similar danceability; matching tempo"),
+    ]
+    count = max(1, min(limit, len(demo_tracks)))
+    recs = [
+        RecommendationItem(
+            track_id=f"demo-{idx}",
+            name=name,
+            artists=artists,
+            preview_url=None,
+            external_url="https://open.spotify.com/",
+            image_url=None,
+            similarity=max(0.6, 0.95 - idx * 0.04),
+            explanation=f"{explanation} (demo data)",
+        )
+        for idx, (name, artists, explanation) in enumerate(demo_tracks[:count])
+    ]
+    if entity.kind == "playlist":
+        return RecommendResponse(
+            type="playlist",
+            seed_playlist=SeedPlaylist(id=entity.id, name="Demo Playlist", track_count=25),
+            playlist=PlaylistIngestSummary(id=entity.id, name="Demo Playlist", track_count=25, ingested_tracks=25),
+            recommendations=recs,
+        )
+    return RecommendResponse(
+        type="track",
+        seed_track=SeedTrack(id=entity.id, name="Demo Seed Track", artists=["Demo Artist"]),
+        recommendations=recs,
+    )
+
+
 async def recommend_for_entity(
     entity: SpotifyEntity,
     *,
@@ -1312,6 +1355,7 @@ async def recommend_for_entity(
     index_service: FaissService,
     settings: Settings,
     limit: int,
+    market: str = "US",
 ) -> RecommendResponse:
 
     if entity.kind == "track":
@@ -1347,6 +1391,7 @@ async def recommend_for_entity(
             limit=limit,
             settings=settings,
             index_service=index_service,
+            market=market,
         )
 
         response = RecommendResponse(
@@ -1365,6 +1410,7 @@ async def recommend_for_entity(
             index_service=index_service,
             settings=settings,
             top_k=limit,
+            market=market,
         )
 
     raise ValueError(f"Unsupported entity type {entity.kind}")

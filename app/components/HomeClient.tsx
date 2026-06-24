@@ -17,7 +17,7 @@ function SpotifyImage({ url, alt, className }: { url?: string | null; alt: strin
   return <Image src={url} alt={alt} width={240} height={240} className={className ?? "artwork"} />;
 }
 
-export function HomeClient({ signedIn }: { signedIn: boolean }) {
+export function HomeClient({ signedIn, demoMode = false }: { signedIn: boolean; demoMode?: boolean }) {
   const [profile, setProfile] = useState<SpotifyProfile | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -106,6 +106,13 @@ export function HomeClient({ signedIn }: { signedIn: boolean }) {
 
   return (
     <div className="dashboard">
+      {demoMode && (
+        <div className="demo-banner">
+          Demo mode: Spotify is not connected. Results are mock data. Set
+          SPOTIFY_CLIENT_ID / REDIRECT_URI / RECOMMENDER_SERVICE_TOKEN in .env to
+          enable the live flow.
+        </div>
+      )}
       <header className="dashboard-header">
         <div className="profile">
           {profile?.images?.[0]?.url ? (

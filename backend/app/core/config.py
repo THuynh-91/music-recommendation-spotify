@@ -13,6 +13,12 @@ class Settings(BaseSettings):
 
     environment: str = "development"
     log_level: str = "INFO"
+    # When true the backend boots without Postgres/Redis/FAISS/librosa and serves
+    # deterministic mock recommendations. Useful for local UI work or when those
+    # services aren't available.
+    demo_mode: bool = False
+    # Default market (ISO 3166-1 alpha-2) used when the request doesn't supply one.
+    default_market: str = "US"
     postgres_dsn: str = "postgresql+asyncpg://postgres:postgres@postgres:5432/spotify"
     redis_url: str = "redis://redis:6379/0"
     spotify_client_id: str = ""

@@ -6,5 +6,6 @@ export async function POST() {
   const common = { httpOnly: true, secure: isProd, sameSite: "lax" as const, path: "/", maxAge: 0 };
   res.cookies.set({ name: "sp_access_token", value: "", ...common });
   res.cookies.set({ name: "sp_refresh_token", value: "", ...common });
+  res.cookies.set({ name: "sp_access_expires_at", value: "", ...common });
   return res;
 }

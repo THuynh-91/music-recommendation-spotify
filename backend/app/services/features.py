@@ -4,7 +4,6 @@ import io
 from typing import Any, Dict
 
 import httpx
-import librosa
 import numpy as np
 from sklearn.preprocessing import normalize
 
@@ -89,6 +88,8 @@ async def compute_dsp_features(preview_url: str | None, *, timeout: float = 10.0
         return {}
 
     try:
+        import librosa  # lazy import: optional heavy dependency
+
         y, sr = librosa.load(io.BytesIO(audio_bytes), sr=22050)
         if y.size == 0:
             return {}

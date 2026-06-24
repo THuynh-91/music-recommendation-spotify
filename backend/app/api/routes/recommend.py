@@ -8,7 +8,7 @@ from ...core.config import Settings
 from ...core.security import verify_service_token
 from ...schemas.recommend import RecommendRequest, RecommendResponse
 from ...services.index import FaissService
-from ...services.recommendations import recommend_for_entity
+from ...services.recommendations import build_demo_response, recommend_for_entity
 from ...spotify.client import SpotifyAuthError, SpotifyClientError
 from ...spotify.parsing import parse_spotify_url
 from ..deps import (
@@ -33,10 +33,15 @@ async def create_recommendations(
     settings: Settings = Depends(get_settings_dep),
 ) -> RecommendResponse:
     entity = parse_spotify_url(payload.url)
-    try:
-        limit = payload.limit or settings.recommendation_top_k
-        limit = max(1, min(limit, settings.recommendation_max_limit))
+    limit = payload.limit or settings.recommendation_top_k
+    limit = max(1, min(limit, settings.recommendation_max_limit))
 
+    # DEMO MODE: serve deterministic mock data without Postgres/Redis/Spotify.
+    if settings.demo_mode:
+        return build_demo_response(entity, limit)
+
+    market = payload.market or settings.default_market
+    try:
         response = await recommend_for_entity(
             entity,
             session=session,
@@ -45,6 +50,7 @@ async def create_recommendations(
             index_service=index_service,
             settings=settings,
             limit=limit,
+            market=market,
         )
         return response
     except SpotifyAuthError as exc:
