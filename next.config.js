@@ -5,6 +5,9 @@ const nextConfig = {
     remotePatterns: [
       { protocol: 'https', hostname: 'i.scdn.co' },
       { protocol: 'https', hostname: 'mosaic.scdn.co' },
+      // Spotify oEmbed thumbnails (seed track artwork) are served from these hosts.
+      { protocol: 'https', hostname: '*.spotifycdn.com' },
+      { protocol: 'https', hostname: '*.scdn.co' },
     ],
   },
   output: 'standalone',
