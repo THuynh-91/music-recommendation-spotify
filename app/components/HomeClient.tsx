@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
 
 import { fetchProfile, requestRecommendations } from "@/lib/spotify";
@@ -32,24 +31,7 @@ function initialsFrom(value: string) {
     .toUpperCase();
 }
 
-/**
- * Renders real Spotify artwork when available, otherwise an attractive
- * generative gradient placeholder so the (image-less) demo still looks polished.
- */
-function Artwork({
-  url,
-  alt,
-  variant = "thumb",
-}: {
-  url?: string | null;
-  alt: string;
-  variant?: "thumb" | "cover";
-}) {
-  const className = variant === "cover" ? "card-cover" : "artwork";
-  if (url) {
-    const size = variant === "cover" ? 480 : 112;
-    return <Image src={url} alt={alt} width={size} height={size} className={className} />;
-  }
+function ArtworkPlaceholder({ alt, className }: { alt: string; className: string }) {
   const hue = hueFromString(alt);
   const style = {
     background: `linear-gradient(135deg, hsl(${hue} 62% 32%), hsl(${(hue + 48) % 360} 58% 18%))`,
@@ -67,6 +49,49 @@ function Artwork({
       </svg>
     </div>
   );
+}
+
+/**
+ * Renders real cover artwork when available, otherwise an attractive generative
+ * gradient placeholder so the experience still looks polished.
+ *
+ * The artwork comes from arbitrary external CDNs (Spotify oEmbed thumbnails,
+ * Deezer album covers whose hosts rotate). We deliberately use a plain <img>
+ * instead of next/image: next/image throws a render-time error ("Invalid src
+ * prop ... hostname is not configured under images") for any host missing from
+ * next.config.js remotePatterns, and with no error boundary that error blanks
+ * the entire page. A plain <img> with an onError fallback can never crash the
+ * render — a broken or unconfigured cover simply falls back to the placeholder.
+ */
+function Artwork({
+  url,
+  alt,
+  variant = "thumb",
+}: {
+  url?: string | null;
+  alt: string;
+  variant?: "thumb" | "cover";
+}) {
+  const className = variant === "cover" ? "card-cover" : "artwork";
+  const [failed, setFailed] = useState(false);
+  // Reset the failure flag if the URL changes (e.g. a card is reused).
+  useEffect(() => setFailed(false), [url]);
+
+  if (url && !failed) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={url}
+        alt={alt}
+        className={className}
+        loading="lazy"
+        decoding="async"
+        referrerPolicy="no-referrer"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return <ArtworkPlaceholder alt={alt} className={className} />;
 }
 
 function ResultsSkeleton({ count }: { count: number }) {
