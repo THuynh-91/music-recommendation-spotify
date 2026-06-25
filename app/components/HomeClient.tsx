@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { fetchProfile, requestRecommendations } from "@/lib/spotify";
 import type { RecommendationItem, RecommendationResponse, SpotifyProfile } from "@/lib/spotify";
@@ -187,6 +187,18 @@ export function HomeClient({ signedIn, noAuthMode = false }: { signedIn: boolean
     event.preventDefault();
     void submitUrl(inputUrl);
   };
+
+  // Auto-load a default example on first mount so visitors land on real
+  // recommendations instead of an empty form. Runs once.
+  const didAutoload = useRef(false);
+  useEffect(() => {
+    if (didAutoload.current) return;
+    didAutoload.current = true;
+    const DEFAULT_SEED = "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b"; // Blinding Lights — The Weeknd
+    setInputUrl(DEFAULT_SEED);
+    void submitUrl(DEFAULT_SEED);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleSignIn = () => {
     window.location.href = "/api/auth/start";
