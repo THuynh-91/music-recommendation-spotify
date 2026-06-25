@@ -87,6 +87,103 @@ async function fetchJson<T>(url: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function fetchText(url: string): Promise<string> {
+  // IMPORTANT: Spotify serves two different pages for a track URL:
+  //   - a JS Web Player shell (generic <title>, NO song-specific og: tags), and
+  //   - an SEO/crawler page that DOES include og:title / og:description / og:image.
+  // A normal browser UA + `Accept: text/html` gets the shell (no og: tags from
+  // server-side fetch), which is exactly what broke disambiguation. Using a
+  // crawler User-Agent and NOT sending the browser Accept header reliably
+  // returns the SEO page with the meta tags we need to parse the real artist.
+  const res = await fetch(url, {
+    cache: "no-store",
+    headers: {
+      "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+    },
+  });
+  if (!res.ok) {
+    throw new RecommenderError(`Upstream request failed (${res.status}) for ${url}`);
+  }
+  return await res.text();
+}
+
+/** Pull the content of the first matching <meta property="<prop>" ...> tag. */
+function metaContent(html: string, prop: string): string | undefined {
+  // Be tolerant of attribute order: property/content can appear in either order.
+  const patterns = [
+    new RegExp(`<meta[^>]+property=["']${prop}["'][^>]+content=["']([^"']*)["']`, "i"),
+    new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+property=["']${prop}["']`, "i"),
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m?.[1]) return decodeHtml(m[1].trim());
+  }
+  return undefined;
+}
+
+function decodeHtml(s: string): string {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+/**
+ * Resolve the REAL {title, artist, image} for a Spotify track by parsing its
+ * public track page. The oEmbed endpoint only returns the title, so a track
+ * that shares a name with another artist's song would resolve to the wrong
+ * artist on Deezer. The track page exposes the artist via several meta tags;
+ * we try them all and fall back gracefully. Returns undefined if nothing usable
+ * could be parsed (callers then fall back to oEmbed).
+ */
+async function resolveFromTrackPage(url: string): Promise<
+  | {
+      title: string | undefined;
+      artist: string | undefined;
+      image: string | undefined;
+    }
+  | undefined
+> {
+  let html: string;
+  try {
+    html = await fetchText(url);
+  } catch {
+    return undefined;
+  }
+
+  const ogTitle = metaContent(html, "og:title");
+  const ogDescription = metaContent(html, "og:description");
+  const ogImage = metaContent(html, "og:image");
+
+  let title = ogTitle || undefined;
+  let artist: string | undefined;
+
+  // og:description is typically "Artist · Album · Song · Year" -> artist is first.
+  if (ogDescription) {
+    const first = ogDescription.split("·")[0]?.trim();
+    if (first && first.toLowerCase() !== "song") artist = first;
+  }
+
+  // Fall back to the <title>: "Song - song and lyrics by Artist | Spotify".
+  if (!artist || !title) {
+    const titleTag = html.match(/<title>([^<]*)<\/title>/i)?.[1];
+    if (titleTag) {
+      const decoded = decodeHtml(titleTag.trim());
+      const byMatch = decoded.match(/^(.*?)\s+-\s+song and lyrics by\s+(.+?)\s*\|\s*Spotify/i);
+      if (byMatch) {
+        title = title || byMatch[1]?.trim();
+        artist = artist || byMatch[2]?.trim();
+      }
+    }
+  }
+
+  if (!title && !artist && !ogImage) return undefined;
+  return { title, artist, image: ogImage };
+}
+
 function spotifySearchLink(title: string, artist: string): string {
   return `https://open.spotify.com/search/${encodeURIComponent(`${title} ${artist}`)}`;
 }
@@ -112,50 +209,100 @@ async function resolveSeed(url: string): Promise<{
   artistId: number;
   image: string | null;
 }> {
-  const oembedUrl = `${OEMBED_ENDPOINT}?url=${encodeURIComponent(url)}`;
-  let oembed: OEmbedResponse;
+  // 1) Primary: parse the public track page for the REAL artist + title. This is
+  //    what disambiguates songs that share a title across different artists.
+  const page = await resolveFromTrackPage(url);
+
+  // 2) oEmbed as a fallback for title/thumbnail (and if the page parse failed).
+  let oembed: OEmbedResponse | undefined;
   try {
-    oembed = await fetchJson<OEmbedResponse>(oembedUrl);
-  } catch (err) {
+    oembed = await fetchJson<OEmbedResponse>(
+      `${OEMBED_ENDPOINT}?url=${encodeURIComponent(url)}`,
+    );
+  } catch {
+    oembed = undefined;
+  }
+
+  const oembedParsed = oembed ? parseOEmbedTitle(oembed) : { query: "", artistHint: undefined };
+
+  const title = (page?.title || oembedParsed.query || "").trim();
+  // The real artist comes from the track page; oEmbed author_name is a weak hint.
+  const realArtist = (page?.artist || oembedParsed.artistHint || "").trim();
+  const seedImage = page?.image ?? oembed?.thumbnail_url ?? null;
+
+  if (!title) {
     throw new RecommenderError(
-      `Could not read the Spotify track via oEmbed (is the URL a public track?): ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      "Could not read a title for this Spotify track (is the URL a public track?).",
     );
   }
 
-  const { query, artistHint } = parseOEmbedTitle(oembed);
-  if (!query) {
-    throw new RecommenderError("Spotify oEmbed returned no title for this URL.");
+  // 3) Scope the Deezer search by artist + track so we match the RIGHT song,
+  //    not a same-named track by a different artist. Prefer a result whose
+  //    artist actually matches the real artist; fall back progressively.
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  let best: DeezerSearchTrack | undefined;
+
+  if (realArtist) {
+    const scopedQuery = `artist:"${realArtist}" track:"${title}"`;
+    try {
+      const scoped = await fetchJson<DeezerSearchResponse>(
+        `${DEEZER_API}/search?q=${encodeURIComponent(scopedQuery)}&limit=10`,
+      );
+      const candidates = (scoped.data ?? []).filter((t) => t.artist?.id);
+      best =
+        candidates.find((t) => t.artist?.name && norm(t.artist.name) === norm(realArtist)) ||
+        candidates.find(
+          (t) =>
+            t.artist?.name &&
+            (norm(t.artist.name).includes(norm(realArtist)) ||
+              norm(realArtist).includes(norm(t.artist.name))),
+        ) ||
+        candidates[0];
+    } catch {
+      best = undefined;
+    }
   }
 
-  // Search Deezer for the title (plus artist hint if available) to get the real
-  // artist + Deezer artist id needed for related-artist lookups.
-  const searchQuery = artistHint ? `${query} ${artistHint}` : query;
-  const search = await fetchJson<DeezerSearchResponse>(
-    `${DEEZER_API}/search?q=${encodeURIComponent(searchQuery)}&limit=5`,
-  );
-  let best: DeezerSearchTrack | undefined = search.data?.find((t) => t.artist?.id);
+  // Fallback A: plain "title artist" search, preferring an artist match.
   if (!best) {
-    // Retry with the bare title in case the artist hint hurt the match.
+    const searchQuery = realArtist ? `${title} ${realArtist}` : title;
+    try {
+      const search = await fetchJson<DeezerSearchResponse>(
+        `${DEEZER_API}/search?q=${encodeURIComponent(searchQuery)}&limit=10`,
+      );
+      const candidates = (search.data ?? []).filter((t) => t.artist?.id);
+      best = realArtist
+        ? candidates.find((t) => t.artist?.name && norm(t.artist.name) === norm(realArtist)) ||
+          candidates[0]
+        : candidates[0];
+    } catch {
+      best = undefined;
+    }
+  }
+
+  // Fallback B: bare title (original behaviour) so we never hard-error.
+  if (!best) {
     const retry = await fetchJson<DeezerSearchResponse>(
-      `${DEEZER_API}/search?q=${encodeURIComponent(query)}&limit=5`,
+      `${DEEZER_API}/search?q=${encodeURIComponent(title)}&limit=5`,
     );
     best = retry.data?.find((t) => t.artist?.id);
   }
+
   if (!best || !best.artist?.id) {
     throw new RecommenderError(
-      `Resolved Spotify title "${query}" but could not match it to an artist on Deezer.`,
+      `Resolved Spotify track "${title}"${
+        realArtist ? ` by ${realArtist}` : ""
+      } but could not match it to an artist on Deezer.`,
     );
   }
 
   return {
-    title: best.title ?? query,
-    artist: best.artist.name ?? artistHint ?? "Unknown artist",
+    // Trust the real artist from the track page when we have it; the Deezer
+    // artist id drives related-artist recs, so it must be the right artist.
+    title: best.title ?? title,
+    artist: realArtist || best.artist.name || "Unknown artist",
     artistId: best.artist.id,
-    // Prefer Spotify's own oEmbed thumbnail for the seed; fall back to the
-    // matched Deezer track's album cover so the seed card still shows art.
-    image: oembed.thumbnail_url ?? albumCover(best.album) ?? null,
+    image: seedImage ?? albumCover(best.album) ?? null,
   };
 }
 
