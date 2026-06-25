@@ -20,12 +20,34 @@ const DEEZER_API = "https://api.deezer.com";
 
 export class RecommenderError extends Error {}
 
+type DeezerAlbum = {
+  cover?: string;
+  cover_small?: string;
+  cover_medium?: string;
+  cover_big?: string;
+  cover_xl?: string;
+};
+
 type DeezerTrack = {
   title?: string;
   title_short?: string;
   link?: string;
   artist?: { name?: string };
+  album?: DeezerAlbum;
 };
+
+/** Pick the best available Deezer album cover URL for a card-sized image. */
+function albumCover(album?: DeezerAlbum): string | null {
+  if (!album) return null;
+  return (
+    album.cover_medium ||
+    album.cover_big ||
+    album.cover ||
+    album.cover_small ||
+    album.cover_xl ||
+    null
+  );
+}
 
 type DeezerSearchResponse = {
   data?: Array<
@@ -35,6 +57,8 @@ type DeezerSearchResponse = {
   >;
   error?: { message?: string };
 };
+
+type DeezerSearchTrack = DeezerTrack & { artist?: { id?: number; name?: string } };
 
 type DeezerRelatedResponse = {
   data?: Array<{ id?: number; name?: string }>;
@@ -111,7 +135,7 @@ async function resolveSeed(url: string): Promise<{
   const search = await fetchJson<DeezerSearchResponse>(
     `${DEEZER_API}/search?q=${encodeURIComponent(searchQuery)}&limit=5`,
   );
-  let best = search.data?.find((t) => t.artist?.id);
+  let best: DeezerSearchTrack | undefined = search.data?.find((t) => t.artist?.id);
   if (!best) {
     // Retry with the bare title in case the artist hint hurt the match.
     const retry = await fetchJson<DeezerSearchResponse>(
@@ -129,7 +153,9 @@ async function resolveSeed(url: string): Promise<{
     title: best.title ?? query,
     artist: best.artist.name ?? artistHint ?? "Unknown artist",
     artistId: best.artist.id,
-    image: oembed.thumbnail_url ?? null,
+    // Prefer Spotify's own oEmbed thumbnail for the seed; fall back to the
+    // matched Deezer track's album cover so the seed card still shows art.
+    image: oembed.thumbnail_url ?? albumCover(best.album) ?? null,
   };
 }
 
@@ -172,7 +198,7 @@ export async function buildRealRecommendations(
       artists: [artist],
       preview_url: null,
       external_url: track.link ?? spotifySearchLink(name, artist),
-      image_url: null,
+      image_url: albumCover(track.album),
       similarity: 0,
       explanation: reason,
     });
